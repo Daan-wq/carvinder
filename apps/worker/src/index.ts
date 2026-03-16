@@ -2,12 +2,14 @@ import express from "express";
 import cron from "node-cron";
 import { prisma, Source } from "@autarb/db";
 import { CreditTracker } from "./scrapers/credit-tracker";
+import { FetchClient } from "./scrapers/fetch-client";
+import { AutoScoutScraper } from "./scrapers/autoscout";
 import { runScrapeJob } from "./jobs/scrape-job";
 
 const app = express();
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3001;
 const CRON_SECRET = process.env.CRON_SECRET || "";
-const CRON_SCHEDULE = process.env.CRON_SCHEDULE || "0 */4 * * *";
+const CRON_SCHEDULE = process.env.CRON_SCHEDULE || "0 8,20 * * *"; // 2x/day: 08:00 and 20:00
 
 let lastRunTime: Date | null = null;
 let lastRunResult: Record<string, unknown> | null = null;
@@ -53,6 +55,37 @@ function startScrape(trigger: string) {
       isRunning = false;
     });
 }
+
+// Debug: fetch one AutoScout page and return raw markdown + parsed listings
+app.get("/debug-fetch", async (req, res) => {
+  const authHeader = req.headers.authorization;
+  if (!CRON_SECRET || authHeader !== `Bearer ${CRON_SECRET}`) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
+
+  const url = (req.query.url as string) || "https://www.autoscout24.nl/lst/volkswagen/golf/?sort=standard&desc=0&ustate=N%2CU&page=1";
+
+  try {
+    const creditTracker = new CreditTracker();
+    const fetchClient = new FetchClient(creditTracker);
+    const { markdown, provider } = await fetchClient.fetchPage(url);
+
+    const scraper = new AutoScoutScraper(fetchClient);
+    const listings = scraper.parseListings(markdown);
+
+    res.json({
+      provider,
+      url,
+      markdownLength: markdown.length,
+      markdownSample: markdown.substring(0, 3000),
+      listingsParsed: listings.length,
+      listings: listings.slice(0, 5),
+    });
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
 
 app.post("/run", (req, res) => {
   const authHeader = req.headers.authorization;

@@ -88,24 +88,19 @@ export async function recalculatePriceProfiles(
     const groups = new Map<string, Group>();
 
     for (const listing of listings) {
-      if (
-        listing.year === null ||
-        listing.mileage === null ||
-        !listing.fuelType ||
-        !listing.condition
-      ) {
-        continue;
-      }
+      if (listing.year === null || listing.mileage === null) continue;
 
       const yearBucket = getYearBucket(listing.year);
       const mileageBucket = getMileageBucket(listing.mileage);
 
+      // Default to USED_GOOD and PETROL when not specified — allows profiles to be
+      // built from list-page scrapes that don't have detail-page enrichment yet.
       const groupKey: GroupKey = {
         yearBucketStart: yearBucket.start,
         yearBucketEnd: yearBucket.end,
         mileageBucket,
-        fuelType: listing.fuelType,
-        condition: listing.condition,
+        fuelType: listing.fuelType ?? FuelType.PETROL,
+        condition: listing.condition ?? Condition.USED_GOOD,
       };
 
       const keyStr = JSON.stringify(groupKey);

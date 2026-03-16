@@ -13,42 +13,96 @@ export class AutoScoutScraper extends BaseScraper {
     if (search.maxPrice) params.append("priceto", String(search.maxPrice));
 
     params.append("sort", "standard");
+    params.append("desc", "0");
+    params.append("ustate", "N,U");
     params.append("page", String(page));
 
-    const make = encodeURIComponent(search.make);
-    const model = search.model ? encodeURIComponent(search.model) : "null";
+    const make = this.toSlug(search.make);
+    const model = search.model ? this.toSlug(search.model) : "";
 
-    return `https://www.autoscout24.nl/lst/${make}/${model}/?${params.toString()}`;
+    const path = model ? `${make}/${model}` : make;
+    return `https://www.autoscout24.nl/lst/${path}/?${params.toString()}`;
   }
 
   parseListings(markdown: string): ScrapedListing[] {
     const listings: ScrapedListing[] = [];
+    const seen = new Set<string>();
 
-    const listingPattern =
-      /\[([^\]]+)\]\((https:\/\/www\.autoscout24\.nl\/[^\s)]+)\)[^\n]*(?:€\s*([0-9.]+)|.)*(?:(\d+\.?\d*)\s*km|.)*(?:(\d{4})|.)/g;
+    // Split markdown into lines for context windows
+    const lines = markdown.split("\n");
 
-    let match;
-    while ((match = listingPattern.exec(markdown)) !== null) {
-      const [, title, url, priceStr, mileageStr, yearStr] = match;
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
 
-      const price = this.parsePrice(priceStr);
-      if (!price) continue;
+      // Find AutoScout listing URLs (detail pages, not search pages)
+      const linkMatch = line.match(
+        /\[([^\]]{3,100})\]\((https:\/\/www\.autoscout24\.(?:nl|com|be|de)\/(?:auto|annonce|offerte)\/[^\s)]+)\)/
+      );
+      if (!linkMatch) continue;
 
-      const listing: ScrapedListing = {
-        externalId: this.extractListingId(url),
+      const [, title, url] = linkMatch;
+
+      // Skip anchors to same-page sections, pagination links
+      if (url.includes("#") || url.includes("?page=")) continue;
+
+      const externalId = this.extractListingId(url);
+      if (!externalId || seen.has(externalId)) continue;
+      seen.add(externalId);
+
+      // Build a context window: lines around the listing link
+      const contextLines = lines.slice(Math.max(0, i - 2), Math.min(lines.length, i + 8));
+      const context = contextLines.join(" ");
+
+      // Price: € followed by digits with optional dots (Dutch formatting)
+      const priceMatch = context.match(/€\s*([\d.]+)/);
+      const price = priceMatch ? parseInt(priceMatch[1].replace(/\./g, ""), 10) : null;
+      if (!price || price < 500 || price > 500000) continue;
+
+      // Year: 4-digit year in 1990-2030 range
+      const yearMatch = context.match(/\b(19[89]\d|20[0-2]\d)\b/);
+      const year = yearMatch ? parseInt(yearMatch[1], 10) : undefined;
+
+      // Mileage: number followed by km (Dutch: 85.000 km = 85000 km)
+      const mileageMatch = context.match(/([\d.]+)\s*km\b/i);
+      let mileage: number | undefined;
+      if (mileageMatch) {
+        const raw = mileageMatch[1].replace(/\./g, "");
+        const num = parseInt(raw, 10);
+        // If the number looks like it's already in km (>500), use as-is, otherwise x1000
+        mileage = num > 500 ? num : num * 1000;
+      }
+
+      const fuelType = this.parseFuelTypeFromText(context);
+      const transmission = this.parseTransmissionFromText(context);
+
+      // AutoScout lists used cars (and some new). Default to USED_GOOD unless "Nieuw" is explicit.
+      const condition = /\bnieuw\b/i.test(context) ? Condition.NEW : Condition.USED_GOOD;
+
+      // City: often follows "in" or appears as standalone Dutch city name
+      const cityMatch = context.match(/\b(?:in|te)\s+([A-Z][a-zÀ-ÿ]+(?:\s+[A-Z][a-zÀ-ÿ]+)?)/);
+      const city = cityMatch ? cityMatch[1].trim() : undefined;
+
+      // Use search make/model when available (more reliable than parsing the title)
+      const make = this.currentSearch?.make ?? this.extractFirstWord(title);
+      const model = this.currentSearch?.model ?? this.extractRemainingWords(title, make);
+
+      listings.push({
+        externalId,
         url,
-        make: this.extractMake(title),
-        model: this.extractModel(title),
-        year: yearStr ? parseInt(yearStr, 10) : undefined,
-        mileage: mileageStr ? Math.floor(parseFloat(mileageStr.replace(/\./g, "")) * 1000) : undefined,
+        make,
+        model,
+        year,
+        mileage,
+        fuelType,
+        transmission,
+        condition,
         price,
-        title,
-        imageUrls: this.extractImageUrls(markdown, url),
+        title: title.trim(),
+        imageUrls: [],
+        city,
         country: "NL",
         rawData: { source: "autoscout24", title },
-      };
-
-      listings.push(listing);
+      });
     }
 
     return listings;
@@ -58,84 +112,66 @@ export class AutoScoutScraper extends BaseScraper {
     const details: Partial<ScrapedListing> = {};
 
     const fuelMatch = markdown.match(/(?:Brandstof|Fuel):\s*([A-Za-z\s]+?)(?:\n|,|$)/i);
-    if (fuelMatch) {
-      details.fuelType = this.parseFuelType(fuelMatch[1]);
+    if (fuelMatch) details.fuelType = this.parseFuelTypeFromText(fuelMatch[1]);
+
+    const transmissionMatch = markdown.match(/(?:Transmissie|Versnellingsbak|Gearbox):\s*([A-Za-z\s]+?)(?:\n|,|$)/i);
+    if (transmissionMatch) details.transmission = this.parseTransmissionFromText(transmissionMatch[1]);
+
+    const mileageMatch = markdown.match(/([\d.]+)\s*km\b/i);
+    if (mileageMatch) {
+      const raw = parseInt(mileageMatch[1].replace(/\./g, ""), 10);
+      details.mileage = raw > 500 ? raw : raw * 1000;
     }
 
-    const transmissionMatch = markdown.match(/(?:Transmissie|Transmission):\s*([A-Za-z\s]+?)(?:\n|,|$)/i);
-    if (transmissionMatch) {
-      details.transmission = this.parseTransmission(transmissionMatch[1]);
-    }
+    const cityMatch = markdown.match(/(?:Locatie|Stad|Plaats|Location):\s*([A-ZÀ-Ÿ][a-zÀ-ÿ\s]+)/);
+    if (cityMatch) details.city = cityMatch[1].trim();
 
-    const mileageDetailMatch = markdown.match(/(\d+(?:\.\d+)?)\s*km\s*(?:km|gelopen|driven)/i);
-    if (mileageDetailMatch && !details.mileage) {
-      const km = Math.floor(parseFloat(mileageDetailMatch[1].replace(/\./g, "")) * 1000);
-      details.mileage = km;
-    }
-
-    const cityMatch = markdown.match(/(?:Locatie|Location):\s*([A-Z][a-zA-Z\s]+)/);
-    if (cityMatch) {
-      details.city = cityMatch[1].trim();
-    }
-
-    const descriptionMatch = markdown.match(/(?:Beschrijving|Description):\s*([^\n]+(?:\n[^\n]*)*?)(?=\n\n|Brandstof|$)/i);
-    if (descriptionMatch) {
-      details.description = descriptionMatch[1].trim().substring(0, 1000);
-    }
+    const descMatch = markdown.match(/(?:Beschrijving|Omschrijving|Description):\s*([^\n]+(?:\n[^\n]+)*?)(?=\n\n|$)/i);
+    if (descMatch) details.description = descMatch[1].trim().substring(0, 1000);
 
     return details;
   }
 
-  private extractMake(title: string): string {
-    const parts = title.split(/\s+/);
-    return parts[0] || "Unknown";
-  }
-
-  private extractModel(title: string): string {
-    const parts = title.split(/\s+/);
-    return parts.slice(1).join(" ").split(/\d{4}/)[0].trim() || "Unknown";
+  private toSlug(s: string): string {
+    return s.toLowerCase().replace(/\s+/g, "-");
   }
 
   private extractListingId(url: string): string {
-    const match = url.match(/listing\/(\d+)/);
-    if (match) return match[1];
-    const hash = url.split("/").filter(p => /^\d+$/.test(p))[0];
-    return hash || url;
+    // AutoScout listing URLs: /auto/{make}/{model}/listing/{uuid} or /annonce/{uuid}
+    const listingMatch = url.match(/\/listing\/([a-z0-9-]{8,})/i);
+    if (listingMatch) return listingMatch[1];
+
+    const annonceMatch = url.match(/\/annonce\/([a-z0-9-]{8,})/i);
+    if (annonceMatch) return annonceMatch[1];
+
+    // Fallback: last path segment
+    const segments = url.split("/").filter(Boolean);
+    return segments[segments.length - 1] || url;
   }
 
-  private parsePrice(priceStr?: string): number | null {
-    if (!priceStr) return null;
-    const price = parseInt(priceStr.replace(/\./g, ""), 10);
-    return isNaN(price) ? null : price;
-  }
-
-  private parseFuelType(fuel: string): FuelType | undefined {
-    const lower = fuel.toLowerCase();
-    if (lower.includes("benzine") || lower.includes("petrol")) return FuelType.PETROL;
-    if (lower.includes("diesel")) return FuelType.DIESEL;
-    if (lower.includes("lpg")) return FuelType.LPG;
-    if (lower.includes("electric") || lower.includes("elektrisch")) return FuelType.ELECTRIC;
-    if (lower.includes("hybrid")) return FuelType.HYBRID;
+  private parseFuelTypeFromText(text: string): FuelType | undefined {
+    const lower = text.toLowerCase();
+    if (/\belektrisch\b|\belectric\b|\bev\b/.test(lower)) return FuelType.ELECTRIC;
+    if (/\bhybride?\b|\bhybrid\b/.test(lower)) return FuelType.HYBRID;
+    if (/\bdiesel\b/.test(lower)) return FuelType.DIESEL;
+    if (/\blpg\b|\baardgas\b|\bcng\b/.test(lower)) return FuelType.LPG;
+    if (/\bbenzine\b|\bpetrol\b|\bbenzin\b/.test(lower)) return FuelType.PETROL;
     return undefined;
   }
 
-  private parseTransmission(transmission: string): Transmission | undefined {
-    const lower = transmission.toLowerCase();
-    if (lower.includes("manual") || lower.includes("handgeschakeld")) return Transmission.MANUAL;
-    if (lower.includes("automatic") || lower.includes("automaat")) return Transmission.AUTOMATIC;
+  private parseTransmissionFromText(text: string): Transmission | undefined {
+    const lower = text.toLowerCase();
+    if (/\bautomaat\b|\bautomatic\b/.test(lower)) return Transmission.AUTOMATIC;
+    if (/\bhandgeschakeld\b|\bmanual\b|\bhandmatig\b/.test(lower)) return Transmission.MANUAL;
     return undefined;
   }
 
-  private extractImageUrls(markdown: string, url: string): string[] {
-    const imageUrls: string[] = [];
-    const imagePattern = /!\[.*?\]\((https:\/\/[^\s)]+\.(?:jpg|jpeg|png|webp)[^\s)]*)\)/gi;
+  private extractFirstWord(title: string): string {
+    return title.split(/\s+/)[0] || "Unknown";
+  }
 
-    let match;
-    while ((match = imagePattern.exec(markdown)) !== null) {
-      imageUrls.push(match[1]);
-      if (imageUrls.length >= 5) break;
-    }
-
-    return imageUrls;
+  private extractRemainingWords(title: string, make: string): string {
+    const rest = title.replace(new RegExp(`^${make}\\s*`, "i"), "");
+    return rest.split(/\b\d{4}\b/)[0].trim() || "Unknown";
   }
 }

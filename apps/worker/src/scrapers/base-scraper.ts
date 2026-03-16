@@ -36,6 +36,7 @@ const DEFAULT_CONFIG: ScraperConfig = {
 export abstract class BaseScraper {
   abstract source: Source;
   protected config: ScraperConfig;
+  protected currentSearch: WatchedSearch | null = null;
 
   constructor(protected fetchClient: FetchClient, config?: Partial<ScraperConfig>) {
     this.config = { ...DEFAULT_CONFIG, ...config };
@@ -46,6 +47,7 @@ export abstract class BaseScraper {
   abstract parseDetailPage(markdown: string): Partial<ScrapedListing>;
 
   async scrape(search: WatchedSearch): Promise<ScrapedListing[]> {
+    this.currentSearch = search;
     const listings: ScrapedListing[] = [];
 
     for (let page = 1; page <= this.config.maxPagesPerSearch; page++) {
@@ -74,7 +76,6 @@ export abstract class BaseScraper {
     return listings;
   }
 
-  // Fetch detail page only for specific listings (called externally when needed)
   async enrichListing(listing: ScrapedListing): Promise<ScrapedListing> {
     try {
       const { markdown } = await this.fetchClient.fetchPage(listing.url);

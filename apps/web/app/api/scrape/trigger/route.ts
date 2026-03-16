@@ -33,7 +33,10 @@ export async function POST(request: NextRequest) {
 
     const response = await fetch(`${workerUrl}/run`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${expectedSecret}`,
+      },
     });
 
     if (!response.ok) {

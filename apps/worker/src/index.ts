@@ -1,5 +1,6 @@
 import express from "express";
 import cron from "node-cron";
+import { prisma, Source } from "@autarb/db";
 import { CreditTracker } from "./scrapers/credit-tracker";
 import { runScrapeJob } from "./jobs/scrape-job";
 
@@ -69,11 +70,42 @@ app.post("/run", (req, res) => {
   startScrape("manual");
 });
 
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`Worker listening on port ${PORT}`);
   console.log(`Cron schedule: ${CRON_SCHEDULE}`);
 
   cron.schedule(CRON_SCHEDULE, () => {
     startScrape("cron");
   });
+
+  await ensureDefaultSearches();
 });
+
+async function ensureDefaultSearches() {
+  const count = await prisma.watchedSearch.count();
+  if (count > 0) return;
+
+  console.log("No watched searches found — seeding defaults");
+
+  const defaults = [
+    { make: "BMW", model: "3-serie", sources: [Source.AUTOSCOUT] },
+    { make: "Volkswagen", model: "Golf", sources: [Source.AUTOSCOUT] },
+    { make: "Audi", model: "A4", sources: [Source.AUTOSCOUT] },
+    { make: "Mercedes-Benz", model: "C-klasse", sources: [Source.AUTOSCOUT] },
+    { make: "Toyota", model: "Corolla", sources: [Source.AUTOSCOUT] },
+  ];
+
+  for (const d of defaults) {
+    await prisma.watchedSearch.create({
+      data: {
+        make: d.make,
+        model: d.model,
+        sources: d.sources,
+        alertThresholdPercent: 15,
+        isActive: true,
+      },
+    });
+  }
+
+  console.log(`Seeded ${defaults.length} default watched searches`);
+}

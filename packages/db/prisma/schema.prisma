@@ -1,0 +1,213 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Source {
+  MARKTPLAATS
+  AUTOSCOUT
+  FACEBOOK
+  AUCTION
+  OTHER
+}
+
+enum Condition {
+  NEW
+  USED_GOOD
+  USED_FAIR
+  DAMAGED
+}
+
+enum FuelType {
+  PETROL
+  DIESEL
+  LPG
+  ELECTRIC
+  HYBRID
+  OTHER
+}
+
+enum Transmission {
+  MANUAL
+  AUTOMATIC
+  OTHER
+}
+
+enum MileageBucket {
+  KM_0_50K
+  KM_50_100K
+  KM_100_150K
+  KM_150_200K
+  KM_200K_PLUS
+}
+
+enum ScrapeJobStatus {
+  PENDING
+  RUNNING
+  DONE
+  FAILED
+}
+
+model CarListing {
+  id             String       @id @default(cuid())
+  source         Source
+  externalId     String
+  url            String
+  make           String
+  model          String
+  year           Int?
+  mileage        Int?
+  fuelType       FuelType?
+  transmission   Transmission?
+  condition      Condition?
+  price          Int
+  title          String
+  description    String?
+  imageUrls      String[]
+  city           String?
+  country        String       @default("NL")
+  rawData        Json?
+  isActive       Boolean      @default(true)
+  isSold         Boolean      @default(false)
+  isPriceChanged Boolean      @default(false)
+  scrapedAt      DateTime     @default(now())
+  firstSeenAt    DateTime     @default(now())
+  lastSeenAt     DateTime     @default(now())
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  priceHistory CarListingPriceHistory[]
+  dealAlerts   DealAlert[]
+
+  @@unique([source, externalId])
+  @@index([make, model])
+  @@index([source])
+  @@index([isActive])
+  @@index([price])
+  @@index([year])
+  @@map("car_listings")
+}
+
+model CarListingPriceHistory {
+  id         String     @id @default(cuid())
+  listingId  String
+  listing    CarListing @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  price      Int
+  recordedAt DateTime   @default(now())
+
+  @@index([listingId])
+  @@index([recordedAt])
+  @@map("car_listing_price_history")
+}
+
+model PriceProfile {
+  id               String       @id @default(cuid())
+  make             String
+  model            String
+  yearBucketStart  Int
+  yearBucketEnd    Int
+  mileageBucket    MileageBucket
+  fuelType         FuelType
+  condition        Condition
+  sampleCount      Int
+  averagePrice     Int
+  medianPrice      Int
+  p10Price         Int
+  p90Price         Int
+  lastCalculatedAt DateTime     @default(now())
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+
+  dealAlerts DealAlert[]
+
+  @@unique([make, model, yearBucketStart, yearBucketEnd, mileageBucket, fuelType, condition])
+  @@index([make, model])
+  @@map("price_profiles")
+}
+
+model DealAlert {
+  id                 String       @id @default(cuid())
+  listingId          String
+  listing            CarListing   @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  profileId          String
+  profile            PriceProfile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  listingPrice       Int
+  averagePrice       Int
+  discountPercent    Float
+  discountEuros      Int
+  notificationSentAt DateTime?
+  isAcknowledged     Boolean      @default(false)
+  createdAt          DateTime     @default(now())
+
+  @@index([isAcknowledged])
+  @@index([createdAt])
+  @@index([listingId])
+  @@map("deal_alerts")
+}
+
+model WatchedSearch {
+  id                    String    @id @default(cuid())
+  make                  String
+  model                 String?
+  yearMin               Int?
+  yearMax               Int?
+  mileageMax            Int?
+  maxPrice              Int?
+  alertThresholdPercent Int       @default(15)
+  sources               Source[]
+  isActive              Boolean   @default(true)
+  lastScrapedAt         DateTime?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  @@map("watched_searches")
+}
+
+model ScrapeJob {
+  id            String          @id @default(cuid())
+  source        Source
+  status        ScrapeJobStatus @default(PENDING)
+  listingsFound Int             @default(0)
+  newListings   Int             @default(0)
+  priceChanges  Int             @default(0)
+  errors        String[]
+  durationMs    Int?
+  creditsUsed   Int             @default(0)
+  startedAt     DateTime        @default(now())
+  completedAt   DateTime?
+  createdAt     DateTime        @default(now())
+
+  @@index([source])
+  @@index([status])
+  @@index([createdAt])
+  @@map("scrape_jobs")
+}
+
+model CreditUsage {
+  id          String   @id @default(cuid())
+  month       String
+  creditsUsed Int      @default(0)
+  creditLimit Int      @default(500)
+  updatedAt   DateTime @updatedAt
+  createdAt   DateTime @default(now())
+
+  @@unique([month])
+  @@map("credit_usage")
+}
+
+model NotificationLog {
+  id        String   @id @default(cuid())
+  type      String
+  dealCount Int      @default(0)
+  message   String
+  sentAt    DateTime @default(now())
+  success   Boolean  @default(true)
+  error     String?
+
+  @@index([sentAt])
+  @@map("notification_logs")
+}

@@ -1,0 +1,22 @@
+{
+  "name": "autarb",
+  "private": true,
+  "scripts": {
+    "build": "turbo build",
+    "dev": "turbo dev",
+    "lint": "turbo lint",
+    "test": "turbo test",
+    "db:generate": "pnpm --filter @autarb/db generate",
+    "db:migrate": "pnpm --filter @autarb/db migrate",
+    "db:push": "pnpm --filter @autarb/db push",
+    "db:studio": "pnpm --filter @autarb/db studio"
+  },
+  "devDependencies": {
+    "turbo": "^2.4.0",
+    "typescript": "^5.7.0"
+  },
+  "packageManager": "pnpm@9.15.0",
+  "engines": {
+    "node": ">=20"
+  }
+}

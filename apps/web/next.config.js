@@ -3,7 +3,10 @@ const nextConfig = {
   transpilePackages: ["@autarb/db"],
   experimental: {
     outputFileTracingIncludes: {
-      "/**": ["../../packages/db/node_modules/.prisma/client/**"],
+      "/**": [
+        "../../node_modules/.pnpm/@prisma+client@*/node_modules/.prisma/client/**",
+        "../../node_modules/.prisma/client/**",
+      ],
     },
   },
 };

@@ -11,6 +11,7 @@ WORKDIR /app
 COPY --from=builder /app/out/json/ .
 RUN pnpm install --frozen-lockfile
 COPY --from=builder /app/out/full/ .
+COPY tsconfig.base.json ./
 RUN pnpm --filter @autarb/db generate
 RUN turbo build --filter=worker
 

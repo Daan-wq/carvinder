@@ -29,4 +29,5 @@ export {
   Transmission,
   MileageBucket,
   ScrapeJobStatus,
+  DealTier,
 } from "@prisma/client";

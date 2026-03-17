@@ -53,8 +53,24 @@ enum ScrapeJobStatus {
   FAILED
 }
 
+enum DealTier {
+  OUTSTANDING
+  GREAT
+  FAIR
+  HIGH
+  OVERPRICED
+}
+
+enum ModelDeploymentStatus {
+  TRAINING
+  VALIDATION
+  CHAMPION
+  CHALLENGER
+  ARCHIVED
+}
+
 model CarListing {
-  id             String       @id @default(cuid())
+  id             String        @id @default(cuid())
   source         Source
   externalId     String
   url            String
@@ -70,19 +86,23 @@ model CarListing {
   description    String?
   imageUrls      String[]
   city           String?
-  country        String       @default("NL")
+  country        String        @default("NL")
+  kenteken       String?
   rawData        Json?
-  isActive       Boolean      @default(true)
-  isSold         Boolean      @default(false)
-  isPriceChanged Boolean      @default(false)
-  scrapedAt      DateTime     @default(now())
-  firstSeenAt    DateTime     @default(now())
-  lastSeenAt     DateTime     @default(now())
-  createdAt      DateTime     @default(now())
-  updatedAt      DateTime     @updatedAt
+  isActive       Boolean       @default(true)
+  isSold         Boolean       @default(false)
+  isPriceChanged Boolean       @default(false)
+  scrapedAt      DateTime      @default(now())
+  firstSeenAt    DateTime      @default(now())
+  lastSeenAt     DateTime      @default(now())
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
 
   priceHistory CarListingPriceHistory[]
   dealAlerts   DealAlert[]
+  nlpFeatures  ListingNLPFeatures?
+  taxData      ListingTaxData?
+  mlPrediction MLPricePrediction?
 
   @@unique([source, externalId])
   @@index([make, model])
@@ -90,6 +110,7 @@ model CarListing {
   @@index([isActive])
   @@index([price])
   @@index([year])
+  @@index([kenteken])
   @@map("car_listings")
 }
 
@@ -106,7 +127,7 @@ model CarListingPriceHistory {
 }
 
 model PriceProfile {
-  id               String       @id @default(cuid())
+  id               String        @id @default(cuid())
   make             String
   model            String
   yearBucketStart  Int
@@ -119,9 +140,9 @@ model PriceProfile {
   medianPrice      Int
   p10Price         Int
   p90Price         Int
-  lastCalculatedAt DateTime     @default(now())
-  createdAt        DateTime     @default(now())
-  updatedAt        DateTime     @updatedAt
+  lastCalculatedAt DateTime      @default(now())
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
 
   dealAlerts DealAlert[]
 
@@ -131,22 +152,29 @@ model PriceProfile {
 }
 
 model DealAlert {
-  id                 String       @id @default(cuid())
+  id                 String             @id @default(cuid())
   listingId          String
-  listing            CarListing   @relation(fields: [listingId], references: [id], onDelete: Cascade)
-  profileId          String
-  profile            PriceProfile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  listing            CarListing         @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  profileId          String?
+  profile            PriceProfile?      @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  mlPredictionId     String?
+  mlPrediction       MLPricePrediction? @relation(fields: [mlPredictionId], references: [id], onDelete: SetNull)
   listingPrice       Int
   averagePrice       Int
   discountPercent    Float
   discountEuros      Int
+  dealTier           DealTier?
+  dealScore          Float?
+  confidence         Float?
+  isMLGenerated      Boolean            @default(false)
   notificationSentAt DateTime?
-  isAcknowledged     Boolean      @default(false)
-  createdAt          DateTime     @default(now())
+  isAcknowledged     Boolean            @default(false)
+  createdAt          DateTime           @default(now())
 
   @@index([isAcknowledged])
   @@index([createdAt])
   @@index([listingId])
+  @@index([dealTier])
   @@map("deal_alerts")
 }
 
@@ -211,4 +239,155 @@ model NotificationLog {
 
   @@index([sentAt])
   @@map("notification_logs")
+}
+
+// --- ML Infrastructure Models ---
+
+model RDWVehicleData {
+  id                     String    @id @default(cuid())
+  kenteken               String    @unique
+  merk                   String?
+  handelsbenaming        String?
+  typeGoedkeuring        String?
+  catalogusprijs         Int?
+  gewicht                Int?
+  cilinderinhoud         Int?
+  vermogenKw             Int?
+  co2Uitstoot            Int?
+  euroKlasse             String?
+  energielabel           String?
+  brandstof              String?
+  apkVervaldatum         DateTime?
+  eersteKleur            String?
+  eersteToelating        DateTime?
+  eersteTenaamstellingNl DateTime?
+  isGeexporteerd         Boolean   @default(false)
+  rawData                Json?
+  lastLookupAt           DateTime  @default(now())
+  createdAt              DateTime  @default(now())
+  updatedAt              DateTime  @updatedAt
+
+  taxRecords ListingTaxData[]
+
+  @@index([merk])
+  @@map("rdw_vehicle_data")
+}
+
+model ListingNLPFeatures {
+  id        String     @id @default(cuid())
+  listingId String     @unique
+  listing   CarListing @relation(fields: [listingId], references: [id], onDelete: Cascade)
+
+  hasDamageKeywords     Boolean @default(false)
+  hasNonRunningKeywords Boolean @default(false)
+  hasNoApkKeywords      Boolean @default(false)
+  hasExportKeywords     Boolean @default(false)
+  hasProjectKeywords    Boolean @default(false)
+  hasPremiumKeywords    Boolean @default(false)
+  redFlagCount          Int     @default(0)
+  redFlagScore          Float   @default(0)
+  premiumFlagCount      Int     @default(0)
+  premiumFlagScore      Float   @default(0)
+  descriptionLength     Int     @default(0)
+  descriptionQuality    Float   @default(0)
+  photoCount            Int     @default(0)
+  isPlaceholderPrice    Boolean @default(false)
+
+  extractedAt DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@map("listing_nlp_features")
+}
+
+model ListingTaxData {
+  id        String          @id @default(cuid())
+  listingId String          @unique
+  listing   CarListing      @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  rdwDataId String?
+  rdwData   RDWVehicleData? @relation(fields: [rdwDataId], references: [id], onDelete: SetNull)
+
+  bpmOriginal       Int?
+  bpmRemaining      Int?
+  bpmDepreciation   Float?
+  mrbAnnual         Int?
+  mrbProvince       String?
+  isEuroCompliant   Boolean?
+  milieuZoneWarning Boolean  @default(false)
+
+  calculatedAt DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([rdwDataId])
+  @@map("listing_tax_data")
+}
+
+model MLModelVersion {
+  id                  String                @id @default(cuid())
+  version             String                @unique
+  status              ModelDeploymentStatus @default(TRAINING)
+  modelType           String
+  trainingWindowStart DateTime
+  trainingWindowEnd   DateTime
+  trainingDatasetSize Int
+  featureCount        Int
+
+  rmseP50        Float?
+  rmseP10        Float?
+  rmseP90        Float?
+  mapeP50        Float?
+  coverageP10P90 Float?
+  r2Score        Float?
+
+  psiScore   Float?
+  isChampion Boolean   @default(false)
+  promotedAt DateTime?
+  archivedAt DateTime?
+
+  modelPath String?
+  metadata  Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  predictions MLPricePrediction[]
+
+  @@index([status])
+  @@index([isChampion])
+  @@map("ml_model_versions")
+}
+
+model MLPricePrediction {
+  id             String         @id @default(cuid())
+  listingId      String         @unique
+  listing        CarListing     @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  modelVersionId String
+  modelVersion   MLModelVersion @relation(fields: [modelVersionId], references: [id])
+
+  predictedP10 Int
+  predictedP50 Int
+  predictedP90 Int
+
+  dealScore     Float
+  dealTier      DealTier
+  suspicionFlag Boolean  @default(false)
+
+  modelConfidence   Float
+  featureConfidence Float
+  sampleConfidence  Float
+  overallConfidence Float
+
+  coverageLevel     Int      @default(1)
+  hasSafetyCap      Boolean  @default(false)
+  safetyCapReason   String?
+  effectiveDealTier DealTier
+
+  predictedAt DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  dealAlerts DealAlert[]
+
+  @@index([dealTier])
+  @@index([effectiveDealTier])
+  @@index([modelVersionId])
+  @@map("ml_price_predictions")
 }

@@ -90,6 +90,7 @@ interface ParsedListing {
   city?: string;
   country: string;
   rawData: object;
+  listedAt?: Date;
 }
 
 interface PageResult {
@@ -117,20 +118,22 @@ function toMakeSlug(make: string): string {
 }
 
 function buildUrl(seg: Segment, page: number): string {
-  const params = new URLSearchParams({
-    sort: "standard",
-    desc: "0",
-    ustate: "N,U",
-    cy: "NL",
-    atype: "C",
-    page: String(page),
-    fregfrom: String(seg.year), // ← correct AutoScout NL param (not yearFrom)
-    fregto: String(seg.year),
-  });
-  if (seg.priceFrom != null) params.set("pricefrom", String(seg.priceFrom));
-  if (seg.priceTo != null) params.set("priceto", String(seg.priceTo));
+  // Build manually — URLSearchParams encodes "N,U" → "N%2CU" which AutoScout ignores,
+  // causing all year/price filters to be silently dropped.
+  const parts = [
+    `sort=standard`,
+    `desc=0`,
+    `ustate=N,U`,   // must stay unencoded — AutoScout NL requires literal comma
+    `cy=NL`,
+    `atype=C`,
+    `page=${page}`,
+    `fregfrom=${seg.year}`,
+    `fregto=${seg.year}`,
+  ];
+  if (seg.priceFrom != null) parts.push(`pricefrom=${seg.priceFrom}`);
+  if (seg.priceTo != null) parts.push(`priceto=${seg.priceTo}`);
 
-  return `https://www.autoscout24.nl/lst/${toMakeSlug(seg.make)}/?${params}`;
+  return `https://www.autoscout24.nl/lst/${toMakeSlug(seg.make)}/?${parts.join("&")}`;
 }
 
 // ─── Parsers ─────────────────────────────────────────────────────────────────
@@ -235,6 +238,10 @@ async function fetchPage(
 
       const powerMatch = detail("speedometer").match(/(\d+)\s*kW/i);
 
+      // AutoScout exposes listing date as firstOnlineDate (ISO string) on the listing object
+      const rawListedAt = raw.firstOnlineDate ?? raw.listedAt ?? raw.onlineDate ?? null;
+      const listedAt = rawListedAt ? new Date(rawListedAt) : undefined;
+
       listings.push({
         externalId,
         url: listingUrl,
@@ -250,6 +257,7 @@ async function fetchPage(
         city: raw.location?.city ?? undefined,
         country: raw.location?.countryCode ?? "NL",
         rawData: { source: "autoscout24", powerKw: powerMatch ? parseInt(powerMatch[1], 10) : undefined },
+        listedAt,
       });
     } catch { /* skip malformed */ }
   }
@@ -329,6 +337,7 @@ async function upsertListing(listing: ParsedListing, stats: Stats) {
           city: listing.city ?? null,
           country: listing.country,
           rawData: listing.rawData,
+          listedAt: listing.listedAt ?? null,
         },
       });
       await prisma.carListingPriceHistory

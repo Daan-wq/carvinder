@@ -189,6 +189,14 @@ def engineer_features(listing: dict[str, Any]) -> dict[str, Any]:
     )
     features["annual_mrb_estimate"] = mrb or 0
 
+    # Listing age (days on market) — longer-listed cars tend to be overpriced
+    listed_at = listing.get("listed_at") or listing.get("listedAt")
+    if listed_at and isinstance(listed_at, (datetime, date)):
+        listed_dt = listed_at.date() if isinstance(listed_at, datetime) else listed_at
+        features["listing_age_days"] = max(0, (now.date() - listed_dt).days)
+    else:
+        features["listing_age_days"] = -1  # unknown
+
     # Seasonal
     features["quarter_listed"] = (now.month - 1) // 3 + 1
     features["month_sin"] = math.sin(2 * math.pi * now.month / 12)
@@ -262,6 +270,7 @@ def get_numeric_feature_names() -> list[str]:
         "is_round_mileage_50k",
         "bpm_remaining",
         "annual_mrb_estimate",
+        "listing_age_days",
         "quarter_listed",
         "month_sin",
         "month_cos",

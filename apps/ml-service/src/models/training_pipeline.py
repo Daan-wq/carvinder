@@ -89,7 +89,8 @@ def run_training_pipeline(
             rdw."eersteToelating" as eerste_toelating,
             rdw."eersteTenaamstellingNl" as eerste_tenaamstelling_nl,
             rdw."apkVervaldatum" as apk_vervaldatum,
-            rdw."eersteKleur" as eerste_kleur
+            rdw."eersteKleur" as eerste_kleur,
+            cl."listedAt" as listed_at
         FROM car_listings cl
         LEFT JOIN listing_nlp_features nlp ON nlp."listingId" = cl.id
         LEFT JOIN listing_tax_data tax ON tax."listingId" = cl.id
@@ -153,7 +154,6 @@ def run_training_pipeline(
 
     X = df_features[numeric_cols].fillna(0)
     y = df_raw["log_price"]
-    weights = df_raw["sample_weight"]
 
     # Step 5: Temporal train/validation split (80/20)
     split_idx = int(len(X) * 0.8)
@@ -164,13 +164,14 @@ def run_training_pipeline(
 
     X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
     y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
+    w_train = df_raw["sample_weight"].iloc[train_idx]
 
     logger.info(f"Train: {len(X_train)}, Validation: {len(X_val)}")
 
     # Step 6: Train model
     model = QuantilePriceModel()
     model.version = version
-    metrics = model.train(X_train, y_train, X_val, y_val)
+    metrics = model.train(X_train, y_train, X_val, y_val, sample_weight=w_train)
 
     # Step 7: Save model
     save_dir = Path(settings.ml_model_dir) / version

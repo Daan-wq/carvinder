@@ -92,6 +92,7 @@ model CarListing {
   isActive       Boolean       @default(true)
   isSold         Boolean       @default(false)
   isPriceChanged Boolean       @default(false)
+  listedAt       DateTime?
   scrapedAt      DateTime      @default(now())
   firstSeenAt    DateTime      @default(now())
   lastSeenAt     DateTime      @default(now())
@@ -111,6 +112,7 @@ model CarListing {
   @@index([price])
   @@index([year])
   @@index([kenteken])
+  @@index([listedAt])
   @@map("car_listings")
 }
 

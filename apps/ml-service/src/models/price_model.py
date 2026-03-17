@@ -48,6 +48,7 @@ class QuantilePriceModel:
         X_val: pd.DataFrame | None = None,
         y_val: pd.Series | None = None,
         params: dict[str, Any] | None = None,
+        sample_weight: pd.Series | None = None,
     ) -> dict[str, Any]:
         """Train all three quantile models.
 
@@ -60,7 +61,7 @@ class QuantilePriceModel:
         metrics = {}
 
         # Create LightGBM datasets
-        train_data = lgb.Dataset(X_train, label=y_train)
+        train_data = lgb.Dataset(X_train, label=y_train, weight=sample_weight)
         val_data = lgb.Dataset(X_val, label=y_val, reference=train_data) if X_val is not None else None
         valid_sets = [train_data] + ([val_data] if val_data else [])
         valid_names = ["train"] + (["val"] if val_data else [])

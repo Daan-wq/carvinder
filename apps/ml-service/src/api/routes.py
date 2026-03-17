@@ -10,9 +10,8 @@ from typing import Any
 import joblib
 import pandas as pd
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.api.dependencies import get_db, get_model_state, set_model_loaded
+from src.api.dependencies import get_model_state, set_model_loaded
 from src.api.schemas import (
     HealthResponse,
     ModelStatusResponse,
@@ -53,7 +52,7 @@ def set_startup_time(t: datetime) -> None:
 
 
 @router.get("/health", response_model=HealthResponse, tags=["health"])
-async def health_check(db: AsyncSession = Depends(get_db)) -> HealthResponse:
+async def health_check() -> HealthResponse:
     try:
         db_status = await check_db_connection()
         model_version = None
@@ -231,9 +230,7 @@ async def get_training_status(job_id: str) -> dict[str, Any]:
 
 
 @router.get("/api/model/status", response_model=ModelStatusResponse, tags=["model"])
-async def get_model_status(
-    db: AsyncSession = Depends(get_db),
-) -> ModelStatusResponse:
+async def get_model_status() -> ModelStatusResponse:
     return ModelStatusResponse(
         champion=None,
         challenger=None,

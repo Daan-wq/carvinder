@@ -15,10 +15,10 @@ import {
 const navigation = [
   { href: "/", label: "Dashboard", icon: BarChart3 },
   { href: "/deals", label: "Deals", icon: Zap },
-  { href: "/prices", label: "Prices", icon: TrendingUp },
-  { href: "/searches", label: "Searches", icon: Search },
-  { href: "/listings", label: "Listings", icon: List },
-  { href: "/notifications", label: "Notifications", icon: Bell },
+  { href: "/listings", label: "Advertenties", icon: List },
+  { href: "/prices", label: "Marktprijzen", icon: TrendingUp },
+  { href: "/searches", label: "Zoekopdrachten", icon: Search },
+  { href: "/notifications", label: "Meldingen", icon: Bell },
 ]
 
 export function Sidebar() {
@@ -28,7 +28,7 @@ export function Sidebar() {
     <div className="hidden md:flex w-64 flex-col bg-slate-900 text-white">
       <div className="p-6 border-b border-slate-700">
         <h1 className="text-xl font-bold">AutoArb</h1>
-        <p className="text-xs text-slate-400 mt-1">Car Price Arbitrage</p>
+        <p className="text-xs text-slate-400 mt-1">Auto Arbitrage</p>
       </div>
 
       <nav className="flex-1 p-4 space-y-1">

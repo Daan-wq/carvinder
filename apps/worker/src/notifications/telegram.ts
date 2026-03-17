@@ -76,6 +76,39 @@ export class TelegramNotifier {
     return msg;
   }
 
+  async sendRawMessage(message: string): Promise<void> {
+    if (!this.botToken || !this.chatId) {
+      console.warn("Telegram credentials not configured. Skipping notification.");
+      return;
+    }
+
+    try {
+      const response = await fetch(
+        `https://api.telegram.org/bot${this.botToken}/sendMessage`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            chat_id: this.chatId,
+            text: message,
+            parse_mode: "HTML",
+            disable_web_page_preview: true,
+          }),
+        }
+      );
+
+      if (!response.ok) {
+        throw new Error(`Telegram API error: ${response.status}`);
+      }
+
+      await this.logNotification(0, message, null, true);
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : "Unknown error";
+      console.error("Failed to send Telegram notification:", error);
+      await this.logNotification(0, message, errorMsg, false);
+    }
+  }
+
   private async logNotification(
     dealCount: number,
     message: string,

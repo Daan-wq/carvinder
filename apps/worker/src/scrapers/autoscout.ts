@@ -1,4 +1,5 @@
 import { Condition, FuelType, Source, Transmission, type WatchedSearch } from "@autarb/db";
+import type { CheerioAPI } from "cheerio";
 import { HtmlClient } from "./html-client";
 import type { ScrapedListing } from "./base-scraper";
 
@@ -29,24 +30,25 @@ export class AutoScoutScraper {
   constructor(private client: HtmlClient) {}
 
   buildSearchUrl(search: WatchedSearch, page: number): string {
-    const params = new URLSearchParams();
-    params.set("sort", "standard");
-    params.set("desc", "0");
-    params.set("ustate", "N,U");
-    params.set("cy", "NL");
-    params.set("atype", "C");
-    params.set("page", String(page));
-
-    if (search.yearMin) params.set("yearFrom", String(search.yearMin));
-    if (search.yearMax) params.set("yearTo", String(search.yearMax));
-    if (search.mileageMax) params.set("kmTo", String(search.mileageMax));
-    if (search.maxPrice) params.set("priceto", String(search.maxPrice));
+    // Build manually — URLSearchParams encodes "N,U" → "N%2CU" which AutoScout ignores
+    const parts = [
+      `sort=standard`,
+      `desc=0`,
+      `ustate=N,U`,
+      `cy=NL`,
+      `atype=C`,
+      `page=${page}`,
+    ];
+    if (search.yearMin) parts.push(`fregfrom=${search.yearMin}`);
+    if (search.yearMax) parts.push(`fregto=${search.yearMax}`);
+    if (search.mileageMax) parts.push(`kmTo=${search.mileageMax}`);
+    if (search.maxPrice) parts.push(`priceto=${search.maxPrice}`);
 
     const make = this.toSlug(search.make);
     const model = search.model ? this.toSlug(search.model) : "";
     const path = model ? `${make}/${model}` : make;
 
-    return `https://www.autoscout24.nl/lst/${path}/?${params.toString()}`;
+    return `https://www.autoscout24.nl/lst/${path}/?${parts.join("&")}`;
   }
 
   async scrape(search: WatchedSearch): Promise<ScrapedListing[]> {
@@ -78,7 +80,7 @@ export class AutoScoutScraper {
     return listings;
   }
 
-  parseListings($: cheerio.CheerioAPI, search: WatchedSearch): ScrapedListing[] {
+  parseListings($: CheerioAPI, search: WatchedSearch): ScrapedListing[] {
     // AutoScout embeds all listing data in __NEXT_DATA__ as structured JSON
     const nextDataScript = $("#__NEXT_DATA__").html();
     if (!nextDataScript) return [];

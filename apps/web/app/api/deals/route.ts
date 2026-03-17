@@ -12,7 +12,7 @@ const querySchema = z.object({
   acknowledged: z.enum(["true", "false"]).transform(v => v === "true").optional(),
   dealTiers: z.string().optional(),
   minConfidence: z.coerce.number().min(0).max(100).optional(),
-  sort: z.enum(["score", "confidence", "newest", "price"]).default("newest"),
+  sort: z.enum(["score", "confidence", "newest", "price"]).default("score"),
 });
 
 export async function GET(request: NextRequest) {
@@ -52,10 +52,10 @@ export async function GET(request: NextRequest) {
 
     const orderBy = (() => {
       switch (sort) {
-        case "score":      return { dealScore: "desc" as const };
-        case "confidence": return { confidence: "desc" as const };
-        case "price":      return { listingPrice: "asc" as const };
-        default:           return { createdAt: "desc" as const };
+        case "score":      return [{ dealScore: "desc" as const }, { createdAt: "desc" as const }];
+        case "confidence": return [{ confidence: "desc" as const }, { createdAt: "desc" as const }];
+        case "price":      return [{ listingPrice: "asc" as const }, { createdAt: "desc" as const }];
+        default:           return [{ createdAt: "desc" as const }];
       }
     })();
 
@@ -67,6 +67,7 @@ export async function GET(request: NextRequest) {
             select: {
               make: true, model: true, year: true, mileage: true,
               fuelType: true, source: true, url: true, city: true,
+              imageUrls: true,
             },
           },
           mlPrediction: {

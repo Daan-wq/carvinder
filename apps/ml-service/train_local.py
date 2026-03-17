@@ -15,10 +15,14 @@ Environment variables (from monorepo .env):
     ML_SERVICE_URL      — Railway ML service URL
     ML_UPLOAD_SECRET    — Shared secret for upload endpoint
 """
+import io
 import os
 import sys
 import time
 from pathlib import Path
+
+# Force UTF-8 output on Windows to avoid cp1252 emoji encoding errors
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
 # Load .env from monorepo root (two levels up from apps/ml-service)
 from dotenv import load_dotenv

@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     rdw_rate_limit: int = 60
     model_retrain_cron: str = "0 3 * * 2"
     min_training_samples: int = 500
+    ml_upload_secret: str = ""
     champion_min_coverage: float = 0.75
     champion_max_psi: float = 0.25
     log_level: str = "INFO"

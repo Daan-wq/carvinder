@@ -9,7 +9,7 @@ from typing import Any
 
 import joblib
 import pandas as pd
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile, status
 
 from src.api.dependencies import get_model_state, set_model_loaded
 from src.api.schemas import (
@@ -237,3 +237,46 @@ async def get_model_status() -> ModelStatusResponse:
         total_predictions=0,
         service_health="initializing",
     )
+
+
+@router.post("/api/model/upload", tags=["model"])
+async def upload_model(
+    model_file: UploadFile = File(...),
+    encodings_file: UploadFile = File(...),
+    version: str = Form(...),
+    secret: str = Form(...),
+) -> dict[str, str]:
+    """Upload a locally-trained model and hot-load it as the new champion."""
+    if settings.ml_upload_secret and secret != settings.ml_upload_secret:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid upload secret")
+
+    model_dir = Path(settings.ml_model_dir)
+    version_dir = model_dir / version
+    version_dir.mkdir(parents=True, exist_ok=True)
+
+    model_path = version_dir / "model.pkl"
+    encodings_path = version_dir / "encodings.pkl"
+
+    with open(model_path, "wb") as f:
+        shutil.copyfileobj(model_file.file, f)
+    with open(encodings_path, "wb") as f:
+        shutil.copyfileobj(encodings_file.file, f)
+
+    new_model = QuantilePriceModel()
+    new_model.load(version_dir)
+    new_model.version = version
+
+    encodings = joblib.load(encodings_path)
+    set_target_encodings(
+        encodings["brand_encoding"],
+        encodings["model_encoding"],
+        encodings["global_mean_log_price"],
+    )
+
+    shutil.copy(model_path, model_dir / "champion.pkl")
+    joblib.dump(encodings, model_dir / "champion_encodings.pkl")
+
+    set_model_loaded(new_model, version)
+
+    logger.info(f"Champion model uploaded and hot-loaded: version={version}")
+    return {"status": "loaded", "version": version}

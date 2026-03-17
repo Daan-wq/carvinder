@@ -9,7 +9,9 @@
  * Runs CONCURRENCY searches in parallel. Adjust as needed.
  */
 
-import "dotenv/config";
+import * as dotenv from "dotenv";
+import * as path from "path";
+dotenv.config({ path: path.resolve(__dirname, "../../../.env") });
 import { prisma, Source, ScrapeJobStatus, Condition, FuelType } from "@autarb/db";
 import { HtmlClient } from "./scrapers/html-client";
 import { AutoScoutScraper } from "./scrapers/autoscout";

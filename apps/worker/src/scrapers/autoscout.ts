@@ -2,6 +2,24 @@ import { Condition, FuelType, Source, Transmission, type WatchedSearch } from "@
 import { HtmlClient } from "./html-client";
 import type { ScrapedListing } from "./base-scraper";
 
+interface NextDataListing {
+  id: string;
+  url: string;
+  price: { priceFormatted: string };
+  vehicle: {
+    make: string;
+    model: string;
+    modelVersionInput?: string;
+    offerType?: string;
+    transmission?: string;
+    fuel?: string;
+    mileageInKm?: string;
+  };
+  vehicleDetails?: Array<{ data: string; iconName: string; ariaLabel: string }>;
+  location?: { countryCode?: string; city?: string };
+  images?: string[];
+}
+
 export class AutoScoutScraper {
   readonly source = Source.AUTOSCOUT;
 
@@ -61,72 +79,56 @@ export class AutoScoutScraper {
   }
 
   parseListings($: cheerio.CheerioAPI, search: WatchedSearch): ScrapedListing[] {
+    // AutoScout embeds all listing data in __NEXT_DATA__ as structured JSON
+    const nextDataScript = $("#__NEXT_DATA__").html();
+    if (!nextDataScript) return [];
+
+    let nextData: any;
+    try {
+      nextData = JSON.parse(nextDataScript);
+    } catch {
+      return [];
+    }
+
+    const rawListings: NextDataListing[] = nextData?.props?.pageProps?.listings ?? [];
     const listings: ScrapedListing[] = [];
     const seen = new Set<string>();
 
-    $("article.cldt-summary-full-item, article[data-item-name='listing-item']").each((_, el) => {
+    for (const raw of rawListings) {
       try {
-        const article = $(el);
-
-        // URL + ID
-        const linkEl = article.find("a[href*='/auto/'], a[href*='/offers/']").first();
-        const href = linkEl.attr("href") || article.find("a").first().attr("href");
-        if (!href) return;
-
-        const url = href.startsWith("http") ? href : `https://www.autoscout24.nl${href}`;
-        const externalId = this.extractId(url);
-        if (!externalId || seen.has(externalId)) return;
+        const externalId = raw.id;
+        if (!externalId || seen.has(externalId)) continue;
         seen.add(externalId);
 
-        // Title
-        const title = article.find("[class*='ListItem_title'], h2, .cldt-summary-titles").first().text().trim()
-          || article.find("a").first().text().trim();
-        if (!title) return;
+        const url = raw.url.startsWith("http")
+          ? raw.url
+          : `https://www.autoscout24.nl${raw.url}`;
 
-        // Price — € 16.950 or €16950
-        const priceText = article.find("[class*='Price_price'], .cldt-price, [data-testid='price']").first().text()
-          || article.find("p, span").filter((_, e) => /€/.test($(e).text())).first().text();
-        const price = this.parsePrice(priceText);
-        if (!price) return;
+        const price = this.parsePrice(raw.price?.priceFormatted);
+        if (!price) continue;
 
-        // Mileage
-        const mileageText = article.find("[data-testid='VehicleDetails-mileage_road'], [data-testid*='mileage']").text()
-          || article.find("span, li").filter((_, e) => /\d+[\s.]?\d*\s*km/i.test($(e).text())).first().text();
-        const mileage = this.parseMileage(mileageText);
+        const detail = (iconName: string) =>
+          raw.vehicleDetails?.find((d) => d.iconName === iconName)?.data ?? "";
 
-        // Year — either "07/2020" format or just "2020"
-        const yearText = article.find("[data-testid='VehicleDetails-calendar'], [data-testid*='calendar']").text()
-          || article.find("span, li").filter((_, e) => /\d{2}\/\d{4}|\b20\d{2}\b/.test($(e).text())).first().text();
-        const year = this.parseYear(yearText);
+        const mileage = this.parseMileage(raw.vehicle.mileageInKm ?? detail("mileage_odometer"));
+        const year = this.parseYear(detail("calendar"));
+        const fuelType = this.parseFuelType(raw.vehicle.fuel ?? detail("gas_pump"));
+        const transmission = this.parseTransmission(raw.vehicle.transmission ?? detail("gearbox"));
+        const powerKw = this.parsePowerKw(detail("speedometer"));
 
-        // Fuel type
-        const fuelText = article.find("[data-testid='VehicleDetails-gas_pump'], [data-testid*='fuel']").text()
-          || article.text();
-        const fuelType = this.parseFuelType(fuelText);
-
-        // Transmission
-        const transmissionText = article.find("[data-testid='VehicleDetails-transmission'], [data-testid*='transmission']").text()
-          || article.text();
-        const transmission = this.parseTransmission(transmissionText);
-
-        // Power
-        const powerText = article.find("[data-testid='VehicleDetails-speedometer'], [data-testid*='power']").text();
-        const powerKw = this.parsePowerKw(powerText);
-
-        // Seller city
-        const city = article.find("[class*='SellerInfo'], .cldt-summary-seller-contact, [data-testid*='seller']")
-          .text().match(/NL[-\s]*\d+\s+([A-Z][A-Z\s]+)/)?.[1]?.trim();
-
-        // Image
-        const imgSrc = article.find("img[src*='autoscout24']").first().attr("src")
-          || article.find("img").first().attr("src");
-        const imageUrls = imgSrc ? [imgSrc] : [];
+        const title = [
+          raw.vehicle.make,
+          raw.vehicle.model,
+          raw.vehicle.modelVersionInput,
+        ]
+          .filter(Boolean)
+          .join(" ");
 
         listings.push({
           externalId,
           url,
           make: search.make,
-          model: search.model ?? this.extractModel(title, search.make),
+          model: search.model ?? raw.vehicle.model,
           year,
           mileage,
           fuelType,
@@ -134,15 +136,15 @@ export class AutoScoutScraper {
           condition: Condition.USED_GOOD,
           price,
           title,
-          imageUrls,
-          city: city ?? undefined,
-          country: "NL",
+          imageUrls: raw.images ?? [],
+          city: raw.location?.city ?? undefined,
+          country: raw.location?.countryCode ?? "NL",
           rawData: { source: "autoscout24", powerKw, title },
         });
-      } catch (err) {
+      } catch {
         // skip malformed listing
       }
-    });
+    }
 
     return listings;
   }
@@ -151,20 +153,7 @@ export class AutoScoutScraper {
     return s.toLowerCase().replace(/\s+/g, "-");
   }
 
-  private extractId(url: string): string | null {
-    // /offers/bmw-318d-...-12345678 or /auto/.../listing/uuid
-    const listingMatch = url.match(/\/listing\/([a-f0-9-]{8,})/i);
-    if (listingMatch) return listingMatch[1];
-
-    const offersMatch = url.match(/\/offers\/[^?#]+?-(\d+)(?:[?#]|$)/);
-    if (offersMatch) return offersMatch[1];
-
-    const segments = url.replace(/[?#].*$/, "").split("/").filter(Boolean);
-    const last = segments[segments.length - 1];
-    return last || null;
-  }
-
-  private parsePrice(text: string): number | null {
+  private parsePrice(text: string | undefined): number | null {
     if (!text) return null;
     const match = text.replace(/\./g, "").match(/(\d{3,7})/);
     if (!match) return null;
@@ -172,7 +161,7 @@ export class AutoScoutScraper {
     return price >= 500 && price <= 500000 ? price : null;
   }
 
-  private parseMileage(text: string): number | undefined {
+  private parseMileage(text: string | undefined): number | undefined {
     if (!text) return undefined;
     const match = text.replace(/\./g, "").match(/(\d{1,6})\s*km/i);
     if (!match) return undefined;
@@ -180,16 +169,17 @@ export class AutoScoutScraper {
     return km > 0 && km < 2000000 ? km : undefined;
   }
 
-  private parseYear(text: string): number | undefined {
+  private parseYear(text: string | undefined): number | undefined {
     if (!text) return undefined;
-    // "07/2021" → 2021
+    // "03/1999" → 1999
     const slashMatch = text.match(/\d{2}\/(\d{4})/);
     if (slashMatch) return parseInt(slashMatch[1], 10);
     const yearMatch = text.match(/\b(19[89]\d|20[012]\d)\b/);
     return yearMatch ? parseInt(yearMatch[1], 10) : undefined;
   }
 
-  private parseFuelType(text: string): FuelType | undefined {
+  private parseFuelType(text: string | undefined): FuelType | undefined {
+    if (!text) return undefined;
     const lower = text.toLowerCase();
     if (/elektrisch|electric|\bev\b|\bbev\b/.test(lower)) return FuelType.ELECTRIC;
     if (/hybride?|hybrid/.test(lower)) return FuelType.HYBRID;
@@ -199,20 +189,17 @@ export class AutoScoutScraper {
     return undefined;
   }
 
-  private parseTransmission(text: string): Transmission | undefined {
+  private parseTransmission(text: string | undefined): Transmission | undefined {
+    if (!text) return undefined;
     const lower = text.toLowerCase();
     if (/automaat|automatic|dsg|automatis/.test(lower)) return Transmission.AUTOMATIC;
     if (/handgeschakeld|manual|schakel/.test(lower)) return Transmission.MANUAL;
     return undefined;
   }
 
-  private parsePowerKw(text: string): number | undefined {
+  private parsePowerKw(text: string | undefined): number | undefined {
+    if (!text) return undefined;
     const match = text.match(/(\d+)\s*kW/i);
     return match ? parseInt(match[1], 10) : undefined;
-  }
-
-  private extractModel(title: string, make: string): string {
-    const rest = title.replace(new RegExp(`^${make}\\s*`, "i"), "");
-    return rest.split(/\b\d{4}\b/)[0].trim() || "Unknown";
   }
 }

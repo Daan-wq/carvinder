@@ -2,9 +2,12 @@ import { prisma, Source, ScrapeJobStatus } from "@autarb/db";
 import { sleep } from "../utils/sleep";
 import { HtmlClient } from "../scrapers/html-client";
 import { AutoScoutScraper } from "../scrapers/autoscout";
-import { recalculatePriceProfiles } from "./price-calculator";
-import { detectDeals } from "./deal-detector";
+import { detectDealsML } from "./ml-deal-detector";
+import { enrichListingsWithRDW } from "./rdw-enrichment-job";
+import { extractAndStoreNLPFeatures } from "../utils/nlp-extractor";
 import { TelegramNotifier } from "../notifications/telegram";
+import { formatMLDealMessage } from "../notifications/ml-telegram-formatter";
+import { mlClient } from "../ml-client";
 
 function getScraperForSource(source: Source, client: HtmlClient) {
   if (source === Source.AUTOSCOUT) return new AutoScoutScraper(client);
@@ -24,7 +27,6 @@ export async function runScrapeJob(): Promise<{
   let newListingsCount = 0;
   let priceChangesCount = 0;
 
-  const affectedMakeModels = new Map<string, { make: string; model: string }>();
   const changedListingIds = new Set<string>();
 
   const searches = await prisma.watchedSearch.findMany({
@@ -88,10 +90,6 @@ export async function runScrapeJob(): Promise<{
 
             newCount++;
             changedListingIds.add(created.id);
-            affectedMakeModels.set(`${created.make}|${created.model}`, {
-              make: created.make,
-              model: created.model,
-            });
           } else if (existing.price !== listing.price) {
             await prisma.carListingPriceHistory.create({
               data: { listingId: existing.id, price: existing.price },
@@ -108,10 +106,6 @@ export async function runScrapeJob(): Promise<{
 
             priceChangeCount++;
             changedListingIds.add(existing.id);
-            affectedMakeModels.set(`${existing.make}|${existing.model}`, {
-              make: existing.make,
-              model: existing.model,
-            });
           } else {
             await prisma.carListing.update({
               where: { id: existing.id },
@@ -158,26 +152,92 @@ export async function runScrapeJob(): Promise<{
     });
   }
 
-  const affectedKeys = Array.from(affectedMakeModels.values());
-  if (affectedKeys.length > 0) {
-    await recalculatePriceProfiles(affectedKeys);
+  // --- NLP Feature Extraction ---
+  const changedIds = Array.from(changedListingIds);
+  if (changedIds.length > 0) {
+    console.log(`Extracting NLP features for ${changedIds.length} listings...`);
+    for (const listingId of changedIds) {
+      try {
+        const listing = await prisma.carListing.findUnique({
+          where: { id: listingId },
+          select: { description: true, title: true, price: true, imageUrls: true },
+        });
+        if (listing) {
+          await extractAndStoreNLPFeatures(
+            listingId,
+            listing.description,
+            listing.title,
+            listing.price,
+            listing.imageUrls.length,
+          );
+        }
+      } catch (e) {
+        console.error(`NLP extraction failed for ${listingId}:`, e);
+      }
+    }
   }
 
-  const deals = await detectDeals(Array.from(changedListingIds));
+  // --- RDW Enrichment (for listings with kenteken) ---
+  try {
+    console.log("Running RDW enrichment for new listings...");
+    await enrichListingsWithRDW(changedIds, 50);
+  } catch (e) {
+    console.error("RDW enrichment failed:", e);
+  }
 
-  if (deals.length > 0) {
-    deals.sort((a, b) => b.alert.discountPercent - a.alert.discountPercent);
+  // --- ML-Powered Deal Detection ---
+  let mlDealsCount = 0;
+  const mlAvailable = await mlClient.isAvailable();
 
-    for (let i = 0; i < deals.length; i += 10) {
-      const batch = deals.slice(i, i + 10);
-      await notifier.sendDealBatch(
-        batch.map(d => ({
-          listing: d.listing,
-          discountPercent: d.alert.discountPercent,
-          discountEuros: d.alert.discountEuros,
-          averagePrice: d.alert.averagePrice,
-        }))
-      );
+  if (mlAvailable && changedIds.length > 0) {
+    try {
+      console.log(`Running ML deal detection for ${changedIds.length} listings...`);
+      const mlDeals = await detectDealsML(changedIds);
+      mlDealsCount = mlDeals.length;
+
+      if (mlDeals.length > 0) {
+        // Send ML-enriched Telegram notifications
+        const mlListings = await Promise.all(
+          mlDeals.map(async (deal) => {
+            const listing = await prisma.carListing.findUnique({
+              where: { id: deal.listingId },
+              include: { nlpFeatures: true },
+            });
+            if (!listing) return null;
+            return {
+              make: listing.make,
+              model: listing.model,
+              year: listing.year,
+              mileage: listing.mileage,
+              fuelType: listing.fuelType,
+              price: listing.price,
+              predictedP50: deal.predictedP50,
+              predictedP10: deal.predictedP10,
+              predictedP90: deal.predictedP90,
+              dealTier: deal.dealTier,
+              dealScore: deal.dealScore,
+              confidence: deal.confidence,
+              city: listing.city,
+              source: listing.source,
+              url: listing.url,
+              hasRedFlags: listing.nlpFeatures?.redFlagCount
+                ? listing.nlpFeatures.redFlagCount > 0
+                : false,
+            };
+          })
+        );
+
+        const validDeals = mlListings.filter(Boolean) as NonNullable<typeof mlListings[number]>[];
+        if (validDeals.length > 0) {
+          for (let i = 0; i < validDeals.length; i += 10) {
+            const batch = validDeals.slice(i, i + 10);
+            const message = formatMLDealMessage(batch);
+            await notifier.sendRawMessage(message);
+          }
+        }
+      }
+    } catch (e) {
+      console.error("ML deal detection failed:", e);
     }
   }
 
@@ -185,6 +245,6 @@ export async function runScrapeJob(): Promise<{
     totalListings,
     newListings: newListingsCount,
     priceChanges: priceChangesCount,
-    deals: deals.length,
+    deals: mlDealsCount,
   };
 }

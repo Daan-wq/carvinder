@@ -14,21 +14,38 @@ export interface HtmlFetchResult {
   html: string;
 }
 
+/**
+ * HTTP client with a sequential request queue.
+ * No matter how many callers invoke fetchPage concurrently,
+ * actual HTTP requests are serialized with a 2.5–4.5s delay between them.
+ * This prevents 429 rate-limiting on a single IP.
+ */
 export class HtmlClient {
   private requestCount = 0;
+  // Chain all fetches so they execute one-at-a-time
+  private queue: Promise<void> = Promise.resolve();
 
   private randomAgent(): string {
     return USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
   }
 
-  async fetchPage(url: string): Promise<HtmlFetchResult> {
-    this.requestCount++;
+  fetchPage(url: string): Promise<HtmlFetchResult> {
+    const result = this.queue.then(async (): Promise<HtmlFetchResult> => {
+      // Polite delay between every request (2.5–4.5 s)
+      if (this.requestCount > 0) {
+        await sleep(2500 + Math.random() * 2000);
+      }
+      this.requestCount++;
+      return this._doFetch(url);
+    });
 
-    // Polite delay: 1-2s between requests
-    if (this.requestCount > 1) {
-      await sleep(1000 + Math.random() * 1000);
-    }
+    // Advance the queue; ignore errors so a failed fetch doesn't block the chain
+    this.queue = result.then(() => {}, () => {});
 
+    return result;
+  }
+
+  private async _doFetch(url: string): Promise<HtmlFetchResult> {
     const response = await axios.get(url, {
       headers: {
         "User-Agent": this.randomAgent(),
@@ -39,7 +56,7 @@ export class HtmlClient {
         "Cache-Control": "no-cache",
         Connection: "keep-alive",
       },
-      timeout: 15000,
+      timeout: 20000,
       maxRedirects: 5,
     });
 

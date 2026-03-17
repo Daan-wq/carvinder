@@ -1,320 +1,446 @@
 /**
- * Bulk scraper — run locally on your machine to mass-collect NL AutoScout data.
+ * Adaptive Bulk Scraper — collects all AutoScout NL listings (~180–250k).
  *
  * Usage:
- *   cd apps/worker
- *   npx tsx src/bulk-scrape.ts
+ *   cd apps/worker && npx tsx src/bulk-scrape.ts
  *
- * Reads DATABASE_URL from ../../.env and writes directly to Railway Postgres.
- * Runs CONCURRENCY searches in parallel. Adjust as needed.
+ * Strategy:
+ *   Phase 1 — make × year (30 makes × 36 years = 1,080 segments, ~3s/request sequential)
+ *     Reads numberOfPages from __NEXT_DATA__ on page 1.
+ *     < 20 pages → scrape all pages directly.
+ *     = 20 pages → OVERFLOW: queue 20 finer price-band sub-segments.
+ *
+ *   Phase 2 — overflow × price_band (max ~300 overflows × 20 bands = 6,000 extra segments)
+ *     Same logic. Finer bands ensure each sub-segment stays <400 results.
+ *
+ *   Total estimated run time: ~6 hours (sequential HTTP at ~3s/request).
  */
 
 import * as dotenv from "dotenv";
 import * as path from "path";
 dotenv.config({ path: path.resolve(__dirname, "../../../.env") });
-import { prisma, Source, ScrapeJobStatus, Condition, FuelType } from "@autarb/db";
+
+import { prisma, Source, Condition, FuelType, Transmission } from "@autarb/db";
 import { HtmlClient } from "./scrapers/html-client";
-import { AutoScoutScraper } from "./scrapers/autoscout";
 import { recalculatePriceProfiles } from "./jobs/price-calculator";
 
-const CONCURRENCY = 5; // parallel search requests — safe for a single IP
-const DELAY_BETWEEN_BATCHES_MS = 3000;
+// ─── Config ──────────────────────────────────────────────────────────────────
 
-// All NL makes + their most common models on AutoScout
-// Model slugs must match AutoScout NL slugs (lowercase, hyphenated, Dutch)
-const NL_MAKES_MODELS: Array<{ make: string; model: string | null }> = [
-  // Volkswagen
-  { make: "Volkswagen", model: "Golf" },
-  { make: "Volkswagen", model: "Polo" },
-  { make: "Volkswagen", model: "Tiguan" },
-  { make: "Volkswagen", model: "Passat" },
-  { make: "Volkswagen", model: "T-Roc" },
-  { make: "Volkswagen", model: "ID.3" },
-  { make: "Volkswagen", model: "ID.4" },
-  { make: "Volkswagen", model: "Transporter" },
+// HtmlClient serializes all HTTP (one at a time, 2.5–4.5 s between requests).
+// CONCURRENCY here only affects how many segments can overlap their DB writes.
+const CONCURRENCY = 6;
+const MAX_PAGES = 20;
 
-  // Toyota
-  { make: "Toyota", model: "Yaris" },
-  { make: "Toyota", model: "Corolla" },
-  { make: "Toyota", model: "C-HR" },
-  { make: "Toyota", model: "RAV4" },
-  { make: "Toyota", model: "Prius" },
-  { make: "Toyota", model: "Aygo" },
-
-  // BMW
-  { make: "BMW", model: "1-serie" },
-  { make: "BMW", model: "2-serie" },
-  { make: "BMW", model: "3-serie" },
-  { make: "BMW", model: "4-serie" },
-  { make: "BMW", model: "5-serie" },
-  { make: "BMW", model: "X1" },
-  { make: "BMW", model: "X3" },
-  { make: "BMW", model: "X5" },
-
-  // Mercedes-Benz
-  { make: "Mercedes-Benz", model: "A-klasse" },
-  { make: "Mercedes-Benz", model: "B-klasse" },
-  { make: "Mercedes-Benz", model: "C-klasse" },
-  { make: "Mercedes-Benz", model: "E-klasse" },
-  { make: "Mercedes-Benz", model: "GLA" },
-  { make: "Mercedes-Benz", model: "GLC" },
-  { make: "Mercedes-Benz", model: "Sprinter" },
-
-  // Audi
-  { make: "Audi", model: "A1" },
-  { make: "Audi", model: "A3" },
-  { make: "Audi", model: "A4" },
-  { make: "Audi", model: "A6" },
-  { make: "Audi", model: "Q3" },
-  { make: "Audi", model: "Q5" },
-  { make: "Audi", model: "e-tron" },
-
-  // Skoda
-  { make: "Skoda", model: "Octavia" },
-  { make: "Skoda", model: "Fabia" },
-  { make: "Skoda", model: "Superb" },
-  { make: "Skoda", model: "Karoq" },
-  { make: "Skoda", model: "Kodiaq" },
-
-  // Peugeot
-  { make: "Peugeot", model: "208" },
-  { make: "Peugeot", model: "308" },
-  { make: "Peugeot", model: "2008" },
-  { make: "Peugeot", model: "3008" },
-  { make: "Peugeot", model: "5008" },
-
-  // Renault
-  { make: "Renault", model: "Clio" },
-  { make: "Renault", model: "Megane" },
-  { make: "Renault", model: "Captur" },
-  { make: "Renault", model: "Kadjar" },
-  { make: "Renault", model: "Zoe" },
-
-  // Ford
-  { make: "Ford", model: "Fiesta" },
-  { make: "Ford", model: "Focus" },
-  { make: "Ford", model: "Puma" },
-  { make: "Ford", model: "Kuga" },
-  { make: "Ford", model: "Mustang Mach-E" },
-  { make: "Ford", model: "Transit Custom" },
-
-  // Opel
-  { make: "Opel", model: "Astra" },
-  { make: "Opel", model: "Corsa" },
-  { make: "Opel", model: "Mokka" },
-  { make: "Opel", model: "Crossland" },
-
-  // Hyundai
-  { make: "Hyundai", model: "i20" },
-  { make: "Hyundai", model: "i30" },
-  { make: "Hyundai", model: "Tucson" },
-  { make: "Hyundai", model: "Kona" },
-  { make: "Hyundai", model: "IONIQ 5" },
-
-  // Kia
-  { make: "Kia", model: "Picanto" },
-  { make: "Kia", model: "Ceed" },
-  { make: "Kia", model: "Sportage" },
-  { make: "Kia", model: "Niro" },
-  { make: "Kia", model: "EV6" },
-
-  // Seat / Cupra
-  { make: "SEAT", model: "Ibiza" },
-  { make: "SEAT", model: "Leon" },
-  { make: "SEAT", model: "Arona" },
-  { make: "SEAT", model: "Ateca" },
-  { make: "Cupra", model: "Formentor" },
-  { make: "Cupra", model: "Born" },
-
-  // Volvo
-  { make: "Volvo", model: "XC40" },
-  { make: "Volvo", model: "XC60" },
-  { make: "Volvo", model: "V60" },
-  { make: "Volvo", model: "V90" },
-
-  // Nissan
-  { make: "Nissan", model: "Micra" },
-  { make: "Nissan", model: "Qashqai" },
-  { make: "Nissan", model: "Juke" },
-  { make: "Nissan", model: "Leaf" },
-
-  // Fiat
-  { make: "Fiat", model: "500" },
-  { make: "Fiat", model: "Panda" },
-  { make: "Fiat", model: "Tipo" },
-  { make: "Fiat", model: "Ducato" },
-
-  // Honda
-  { make: "Honda", model: "Jazz" },
-  { make: "Honda", model: "HR-V" },
-  { make: "Honda", model: "CR-V" },
-  { make: "Honda", model: "Civic" },
-
-  // Tesla
-  { make: "Tesla", model: "Model 3" },
-  { make: "Tesla", model: "Model Y" },
-  { make: "Tesla", model: "Model S" },
-
-  // Citroën
-  { make: "Citroën", model: "C3" },
-  { make: "Citroën", model: "C4" },
-  { make: "Citroën", model: "C5 Aircross" },
-  { make: "Citroën", model: "Berlingo" },
-
-  // Dacia
-  { make: "Dacia", model: "Sandero" },
-  { make: "Dacia", model: "Duster" },
-  { make: "Dacia", model: "Logan" },
-  { make: "Dacia", model: "Spring" },
-
-  // Mazda
-  { make: "Mazda", model: "CX-5" },
-  { make: "Mazda", model: "CX-30" },
-  { make: "Mazda", model: "3" },
-  { make: "Mazda", model: "MX-30" },
-
-  // Mini
-  { make: "MINI", model: "Cooper" },
-  { make: "MINI", model: "Countryman" },
-  { make: "MINI", model: "Clubman" },
-
-  // Porsche
-  { make: "Porsche", model: "Cayenne" },
-  { make: "Porsche", model: "Macan" },
-  { make: "Porsche", model: "911" },
-  { make: "Porsche", model: "Taycan" },
-
-  // Land Rover / Jaguar
-  { make: "Land Rover", model: "Range Rover Evoque" },
-  { make: "Land Rover", model: "Discovery Sport" },
+const ALL_NL_MAKES = [
+  "Alfa Romeo", "Audi", "BMW", "Citroën", "Cupra",
+  "Dacia", "Fiat", "Ford", "Honda", "Hyundai",
+  "Jaguar", "Jeep", "Kia", "Land Rover", "Mazda",
+  "Mercedes-Benz", "MINI", "Mitsubishi", "Nissan", "Opel",
+  "Peugeot", "Porsche", "Renault", "SEAT", "Skoda",
+  "Suzuki", "Tesla", "Toyota", "Volkswagen", "Volvo",
 ];
 
-async function upsertListing(listing: ReturnType<AutoScoutScraper["parseListings"]>[number]) {
-  const existing = await prisma.carListing.findUnique({
-    where: { source_externalId: { source: Source.AUTOSCOUT, externalId: listing.externalId } },
-  });
+const YEARS = Array.from({ length: 36 }, (_, i) => 1990 + i); // 1990–2025
 
-  if (!existing) {
-    const created = await prisma.carListing.create({
-      data: {
-        source: Source.AUTOSCOUT,
-        externalId: listing.externalId,
-        url: listing.url,
-        make: listing.make,
-        model: listing.model,
-        year: listing.year ?? null,
-        mileage: listing.mileage ?? null,
-        fuelType: listing.fuelType ?? null,
-        transmission: listing.transmission ?? null,
-        condition: listing.condition ?? null,
-        price: listing.price,
-        title: listing.title,
-        imageUrls: listing.imageUrls,
-        city: listing.city ?? null,
-        country: listing.country ?? "NL",
-        rawData: listing.rawData as object,
-      },
-    });
-    await prisma.carListingPriceHistory.create({
-      data: { listingId: created.id, price: listing.price },
-    }).catch(() => null);
-    return "new";
-  } else if (existing.price !== listing.price) {
-    await prisma.carListingPriceHistory.create({
-      data: { listingId: existing.id, price: existing.price },
-    }).catch(() => null);
-    await prisma.carListing.update({
-      where: { id: existing.id },
-      data: { price: listing.price, isPriceChanged: true, lastSeenAt: new Date() },
-    });
-    return "updated";
-  } else {
-    await prisma.carListing.update({
-      where: { id: existing.id },
-      data: { lastSeenAt: new Date() },
-    });
-    return "seen";
-  }
+// 20 price bands — fine enough that even VW peak years stay under 400/band
+const PRICE_BANDS: Array<{ min: number | null; max: number | null }> = [
+  { min: null,  max: 3000  },
+  { min: 3000,  max: 5000  },
+  { min: 5000,  max: 7000  },
+  { min: 7000,  max: 9000  },
+  { min: 9000,  max: 11000 },
+  { min: 11000, max: 13000 },
+  { min: 13000, max: 15000 },
+  { min: 15000, max: 17000 },
+  { min: 17000, max: 19000 },
+  { min: 19000, max: 21000 },
+  { min: 21000, max: 23000 },
+  { min: 23000, max: 26000 },
+  { min: 26000, max: 29000 },
+  { min: 29000, max: 33000 },
+  { min: 33000, max: 38000 },
+  { min: 38000, max: 45000 },
+  { min: 45000, max: 55000 },
+  { min: 55000, max: 70000 },
+  { min: 70000, max: 100000 },
+  { min: 100000, max: null },
+];
+
+// ─── Types ───────────────────────────────────────────────────────────────────
+
+interface Segment {
+  make: string;
+  year: number;
+  priceFrom?: number | null;
+  priceTo?: number | null;
 }
 
-async function scrapeSearchEntry(
-  entry: { make: string; model: string | null },
+interface ParsedListing {
+  externalId: string;
+  url: string;
+  make: string;
+  model: string;
+  title: string;
+  price: number;
+  year?: number;
+  mileage?: number;
+  fuelType?: FuelType;
+  transmission?: Transmission;
+  imageUrls: string[];
+  city?: string;
+  country: string;
+  rawData: object;
+}
+
+interface PageResult {
+  listings: ParsedListing[];
+  numberOfPages: number;
+  numberOfResults: number;
+}
+
+interface Stats {
+  total: number;
+  newCount: number;
+  updated: number;
+  errors: number;
+  overflows: number;
+}
+
+// ─── URL builder ─────────────────────────────────────────────────────────────
+
+function toMakeSlug(make: string): string {
+  return make
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "") // Citroën → citroen
+    .replace(/\s+/g, "-");
+}
+
+function buildUrl(seg: Segment, page: number): string {
+  const params = new URLSearchParams({
+    sort: "standard",
+    desc: "0",
+    ustate: "N,U",
+    cy: "NL",
+    atype: "C",
+    page: String(page),
+    fregfrom: String(seg.year), // ← correct AutoScout NL param (not yearFrom)
+    fregto: String(seg.year),
+  });
+  if (seg.priceFrom != null) params.set("pricefrom", String(seg.priceFrom));
+  if (seg.priceTo != null) params.set("priceto", String(seg.priceTo));
+
+  return `https://www.autoscout24.nl/lst/${toMakeSlug(seg.make)}/?${params}`;
+}
+
+// ─── Parsers ─────────────────────────────────────────────────────────────────
+
+function parsePrice(text: string | undefined): number | null {
+  if (!text) return null;
+  const m = text.replace(/\./g, "").match(/(\d{3,7})/);
+  if (!m) return null;
+  const p = parseInt(m[1], 10);
+  return p >= 500 && p <= 500000 ? p : null;
+}
+
+function parseMileage(text: string | undefined): number | undefined {
+  if (!text) return undefined;
+  const m = text.replace(/\./g, "").match(/(\d{1,6})\s*km/i);
+  if (!m) return undefined;
+  const km = parseInt(m[1], 10);
+  return km > 0 && km < 2000000 ? km : undefined;
+}
+
+function parseYear(text: string | undefined): number | undefined {
+  if (!text) return undefined;
+  const s = text.match(/\d{2}\/(\d{4})/);
+  if (s) return parseInt(s[1], 10);
+  const y = text.match(/\b(19[89]\d|20[012]\d)\b/);
+  return y ? parseInt(y[1], 10) : undefined;
+}
+
+function parseFuelType(text: string | undefined): FuelType | undefined {
+  if (!text) return undefined;
+  const t = text.toLowerCase();
+  if (/elektrisch|electric|\bev\b/.test(t)) return FuelType.ELECTRIC;
+  if (/hybride?|hybrid/.test(t)) return FuelType.HYBRID;
+  if (/diesel/.test(t)) return FuelType.DIESEL;
+  if (/lpg|autogas/.test(t)) return FuelType.LPG;
+  if (/benzine|petrol|benzin/.test(t)) return FuelType.PETROL;
+  return undefined;
+}
+
+function parseTransmission(text: string | undefined): Transmission | undefined {
+  if (!text) return undefined;
+  const t = text.toLowerCase();
+  if (/automaat|automatic|dsg/.test(t)) return Transmission.AUTOMATIC;
+  if (/handgeschakeld|manual|schakel/.test(t)) return Transmission.MANUAL;
+  return undefined;
+}
+
+// ─── Fetch one page ───────────────────────────────────────────────────────────
+
+async function fetchPage(
   client: HtmlClient,
-  scraper: AutoScoutScraper,
-  stats: { total: number; newCount: number; updated: number; errors: number }
-) {
-  const search = {
-    id: "",
-    make: entry.make,
-    model: entry.model,
-    yearMin: null,
-    yearMax: null,
-    mileageMax: null,
-    maxPrice: null,
-    alertThresholdPercent: 15,
-    sources: [Source.AUTOSCOUT],
-    isActive: true,
-    lastScrapedAt: null,
-    createdAt: new Date(),
-    updatedAt: new Date(),
-  } as any;
+  seg: Segment,
+  page: number,
+  attempt = 0
+): Promise<PageResult> {
+  const url = buildUrl(seg, page);
+
+  let fetchResult: Awaited<ReturnType<HtmlClient["fetchPage"]>>;
+  try {
+    fetchResult = await client.fetchPage(url);
+  } catch (err: any) {
+    const status = err?.response?.status;
+    if ((status === 429 || status === 503) && attempt < 4) {
+      const wait = [15000, 30000, 60000, 120000][attempt];
+      console.warn(`\n[${status}] ${seg.make} ${seg.year} p${page} — retry in ${wait / 1000}s`);
+      await new Promise(r => setTimeout(r, wait));
+      return fetchPage(client, seg, page, attempt + 1);
+    }
+    throw err;
+  }
+
+  const { $ } = fetchResult;
+  const nextDataScript = $("#__NEXT_DATA__").html();
+  if (!nextDataScript) return { listings: [], numberOfPages: 0, numberOfResults: 0 };
+
+  let nextData: any;
+  try { nextData = JSON.parse(nextDataScript); } catch { return { listings: [], numberOfPages: 0, numberOfResults: 0 }; }
+
+  const pageProps = nextData?.props?.pageProps ?? {};
+  const numberOfPages: number = pageProps.numberOfPages ?? 0;
+  const numberOfResults: number = pageProps.numberOfResults ?? 0;
+  const rawListings: any[] = pageProps.listings ?? [];
+
+  const seen = new Set<string>();
+  const listings: ParsedListing[] = [];
+
+  for (const raw of rawListings) {
+    try {
+      const externalId: string = raw.id;
+      if (!externalId || seen.has(externalId)) continue;
+      seen.add(externalId);
+
+      const listingUrl: string = raw.url?.startsWith("http")
+        ? raw.url
+        : `https://www.autoscout24.nl${raw.url}`;
+
+      const price = parsePrice(raw.price?.priceFormatted);
+      if (!price) continue;
+
+      const detail = (icon: string): string =>
+        (raw.vehicleDetails as any[] | undefined)?.find((d: any) => d.iconName === icon)?.data ?? "";
+
+      const powerMatch = detail("speedometer").match(/(\d+)\s*kW/i);
+
+      listings.push({
+        externalId,
+        url: listingUrl,
+        make: seg.make,
+        model: raw.vehicle?.model ?? "Unknown",
+        title: [raw.vehicle?.make, raw.vehicle?.model, raw.vehicle?.modelVersionInput].filter(Boolean).join(" "),
+        price,
+        year: parseYear(detail("calendar")),
+        mileage: parseMileage(raw.vehicle?.mileageInKm ?? detail("mileage_odometer")),
+        fuelType: parseFuelType(raw.vehicle?.fuel ?? detail("gas_pump")),
+        transmission: parseTransmission(raw.vehicle?.transmission ?? detail("gearbox")),
+        imageUrls: Array.isArray(raw.images) ? raw.images : [],
+        city: raw.location?.city ?? undefined,
+        country: raw.location?.countryCode ?? "NL",
+        rawData: { source: "autoscout24", powerKw: powerMatch ? parseInt(powerMatch[1], 10) : undefined },
+      });
+    } catch { /* skip malformed */ }
+  }
+
+  return { listings, numberOfPages, numberOfResults };
+}
+
+// ─── Scrape full segment (all pages) ─────────────────────────────────────────
+
+async function scrapeSegment(
+  client: HtmlClient,
+  seg: Segment,
+  stats: Stats,
+  affectedKeys: Map<string, { make: string; model: string }>
+): Promise<boolean /* isOverflow */> {
+  const label = `${seg.make} ${seg.year}` +
+    (seg.priceFrom != null ? ` €${seg.priceFrom ?? 0}–${seg.priceTo ?? "∞"}` : "");
 
   try {
-    const listings = await scraper.scrape(search);
-    stats.total += listings.length;
+    const first = await fetchPage(client, seg, 1);
 
-    for (const listing of listings) {
-      const result = await upsertListing(listing);
-      if (result === "new") stats.newCount++;
-      else if (result === "updated") stats.updated++;
+    if (first.numberOfResults === 0) {
+      process.stdout.write("·");
+      return false;
     }
 
-    console.log(`✓ ${entry.make} ${entry.model ?? "(all)"}: ${listings.length} listings`);
+    const isOverflow = first.numberOfPages >= MAX_PAGES;
+    const allListings = [...first.listings];
+
+    for (let page = 2; page <= Math.min(first.numberOfPages, MAX_PAGES); page++) {
+      const result = await fetchPage(client, seg, page);
+      allListings.push(...result.listings);
+    }
+
+    for (const listing of allListings) {
+      await upsertListing(listing, stats);
+      affectedKeys.set(`${listing.make}|${listing.model}`, { make: listing.make, model: listing.model });
+    }
+
+    console.log(
+      `\n✓ ${label}: ${allListings.length}/${first.numberOfResults}` +
+      (isOverflow ? "  ⚠️  splitting by price" : "")
+    );
+
+    return isOverflow;
   } catch (err) {
-    console.error(`✗ ${entry.make} ${entry.model ?? "(all)"}: ${String(err)}`);
+    console.error(`\n✗ ${label}: ${String(err)}`);
     stats.errors++;
+    return false;
   }
 }
 
+// ─── DB upsert ────────────────────────────────────────────────────────────────
+
+async function upsertListing(listing: ParsedListing, stats: Stats) {
+  try {
+    const existing = await prisma.carListing.findUnique({
+      where: { source_externalId: { source: Source.AUTOSCOUT, externalId: listing.externalId } },
+    });
+
+    if (!existing) {
+      const created = await prisma.carListing.create({
+        data: {
+          source: Source.AUTOSCOUT,
+          externalId: listing.externalId,
+          url: listing.url,
+          make: listing.make,
+          model: listing.model,
+          year: listing.year ?? null,
+          mileage: listing.mileage ?? null,
+          fuelType: listing.fuelType ?? null,
+          transmission: listing.transmission ?? null,
+          condition: Condition.USED_GOOD,
+          price: listing.price,
+          title: listing.title,
+          imageUrls: listing.imageUrls,
+          city: listing.city ?? null,
+          country: listing.country,
+          rawData: listing.rawData,
+        },
+      });
+      await prisma.carListingPriceHistory
+        .create({ data: { listingId: created.id, price: listing.price } })
+        .catch(() => null);
+      stats.newCount++;
+    } else if (existing.price !== listing.price) {
+      await prisma.carListingPriceHistory
+        .create({ data: { listingId: existing.id, price: existing.price } })
+        .catch(() => null);
+      await prisma.carListing.update({
+        where: { id: existing.id },
+        data: { price: listing.price, isPriceChanged: true, lastSeenAt: new Date() },
+      });
+      stats.updated++;
+    } else {
+      await prisma.carListing.update({
+        where: { id: existing.id },
+        data: { lastSeenAt: new Date() },
+      });
+    }
+    stats.total++;
+  } catch (err: any) {
+    if (err?.code !== "P2002") throw err; // ignore race-condition duplicates
+  }
+}
+
+// ─── Worker-pool queue ────────────────────────────────────────────────────────
+
+async function processQueue<T>(
+  items: T[],
+  concurrency: number,
+  fn: (item: T) => Promise<void>
+): Promise<void> {
+  const queue = [...items];
+  await Promise.all(
+    Array.from({ length: concurrency }, async () => {
+      while (queue.length > 0) {
+        await fn(queue.shift()!);
+      }
+    })
+  );
+}
+
+// ─── Main ─────────────────────────────────────────────────────────────────────
+
 async function runBulkScrape() {
-  console.log(`\n🚗 AutoArb Bulk Scraper — ${NL_MAKES_MODELS.length} make/model combinations\n`);
-  console.log(`Concurrency: ${CONCURRENCY} | Delay between batches: ${DELAY_BETWEEN_BATCHES_MS}ms\n`);
+  const startTime = Date.now();
+  console.log(`\n🚗  AutoArb Adaptive Bulk Scraper`);
+  console.log(`Makes: ${ALL_NL_MAKES.length} | Years: 1990–2025 | Concurrency: ${CONCURRENCY}`);
+  console.log(`HTTP: serialized, ~3s/request | Price bands: ${PRICE_BANDS.length} (overflow splits)\n`);
 
   const client = new HtmlClient();
-  const scraper = new AutoScoutScraper(client);
-  const stats = { total: 0, newCount: 0, updated: 0, errors: 0 };
+  const stats: Stats = { total: 0, newCount: 0, updated: 0, errors: 0, overflows: 0 };
+  const affectedKeys = new Map<string, { make: string; model: string }>();
 
-  // Process in batches of CONCURRENCY
-  for (let i = 0; i < NL_MAKES_MODELS.length; i += CONCURRENCY) {
-    const batch = NL_MAKES_MODELS.slice(i, i + CONCURRENCY);
-    const batchNum = Math.floor(i / CONCURRENCY) + 1;
-    const totalBatches = Math.ceil(NL_MAKES_MODELS.length / CONCURRENCY);
+  // ── Phase 1: make × year ───────────────────────────────────────────────────
+  const phase1: Segment[] = ALL_NL_MAKES.flatMap(make => YEARS.map(year => ({ make, year })));
+  console.log(`Phase 1: ${phase1.length} segments (${ALL_NL_MAKES.length} makes × ${YEARS.length} years)\n`);
 
-    console.log(`\nBatch ${batchNum}/${totalBatches}: ${batch.map(e => `${e.make} ${e.model ?? ""}`).join(", ")}`);
+  const overflowQueue: Segment[] = [];
+  let p1done = 0;
 
-    await Promise.all(batch.map(entry => scrapeSearchEntry(entry, client, scraper, stats)));
-
-    if (i + CONCURRENCY < NL_MAKES_MODELS.length) {
-      await new Promise(r => setTimeout(r, DELAY_BETWEEN_BATCHES_MS));
+  await processQueue(phase1, CONCURRENCY, async seg => {
+    const isOverflow = await scrapeSegment(client, seg, stats, affectedKeys);
+    if (isOverflow) {
+      for (const band of PRICE_BANDS) {
+        overflowQueue.push({ make: seg.make, year: seg.year, priceFrom: band.min, priceTo: band.max });
+      }
+      stats.overflows++;
     }
+    p1done++;
+    if (p1done % 100 === 0) {
+      const elapsed = ((Date.now() - startTime) / 60000).toFixed(1);
+      const rate = p1done / ((Date.now() - startTime) / 1000);
+      const eta = ((phase1.length - p1done) / rate / 60).toFixed(0);
+      console.log(`\n[Phase 1] ${p1done}/${phase1.length} | ${elapsed}min | ETA ~${eta}min | new: ${stats.newCount} | overflows: ${stats.overflows}\n`);
+    }
+  });
+
+  // ── Phase 2: overflow × price band ────────────────────────────────────────
+  if (overflowQueue.length > 0) {
+    console.log(`\n\nPhase 2: ${overflowQueue.length} overflow segments\n`);
+    let p2done = 0;
+    await processQueue(overflowQueue, CONCURRENCY, async seg => {
+      await scrapeSegment(client, seg, stats, affectedKeys);
+      p2done++;
+      if (p2done % 100 === 0) {
+        console.log(`\n[Phase 2] ${p2done}/${overflowQueue.length} | new: ${stats.newCount}\n`);
+      }
+    });
   }
 
-  // Recalculate price profiles for all affected make/models
-  console.log("\n📊 Recalculating price profiles...");
-  const uniqueKeys = NL_MAKES_MODELS.map(e => ({ make: e.make, model: e.model ?? e.make }));
-  const profilesUpdated = await recalculatePriceProfiles(uniqueKeys);
+  // ── Price profiles ─────────────────────────────────────────────────────────
+  const keys = Array.from(affectedKeys.values());
+  if (keys.length > 0) {
+    console.log(`\n\n📊 Recalculating price profiles for ${keys.length} make/model combos...`);
+    const profilesUpdated = await recalculatePriceProfiles(keys);
+    console.log(`   Profiles built: ${profilesUpdated}`);
+  }
 
-  console.log(`\n✅ Bulk scrape complete!`);
-  console.log(`   Total listings found : ${stats.total}`);
-  console.log(`   New listings saved   : ${stats.newCount}`);
-  console.log(`   Price updates        : ${stats.updated}`);
-  console.log(`   Errors               : ${stats.errors}`);
-  console.log(`   Price profiles built : ${profilesUpdated}`);
+  const totalMin = ((Date.now() - startTime) / 60000).toFixed(1);
+  console.log(`\n✅ Done in ${totalMin} min`);
+  console.log(`   Total processed : ${stats.total}`);
+  console.log(`   New listings    : ${stats.newCount}`);
+  console.log(`   Price updates   : ${stats.updated}`);
+  console.log(`   Errors          : ${stats.errors}`);
 
   await prisma.$disconnect();
 }
 
 runBulkScrape().catch(err => {
-  console.error("Fatal error:", err);
+  console.error("Fatal:", err);
   process.exit(1);
 });

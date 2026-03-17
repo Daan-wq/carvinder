@@ -1,11 +1,15 @@
 import { prisma, Source, ScrapeJobStatus } from "@autarb/db";
 import { sleep } from "../utils/sleep";
-import { CreditTracker } from "../scrapers/credit-tracker";
-import { FetchClient } from "../scrapers/fetch-client";
-import { getScraperForSource } from "../scrapers/scraper-registry";
+import { HtmlClient } from "../scrapers/html-client";
+import { AutoScoutScraper } from "../scrapers/autoscout";
 import { recalculatePriceProfiles } from "./price-calculator";
 import { detectDeals } from "./deal-detector";
 import { TelegramNotifier } from "../notifications/telegram";
+
+function getScraperForSource(source: Source, client: HtmlClient) {
+  if (source === Source.AUTOSCOUT) return new AutoScoutScraper(client);
+  return null;
+}
 
 export async function runScrapeJob(): Promise<{
   totalListings: number;
@@ -13,8 +17,7 @@ export async function runScrapeJob(): Promise<{
   priceChanges: number;
   deals: number;
 }> {
-  const creditTracker = new CreditTracker();
-  const fetchClient = new FetchClient(creditTracker);
+  const htmlClient = new HtmlClient();
   const notifier = new TelegramNotifier();
 
   let totalListings = 0;
@@ -30,7 +33,7 @@ export async function runScrapeJob(): Promise<{
 
   for (const search of searches) {
     for (const source of search.sources) {
-      const scraper = getScraperForSource(source, fetchClient);
+      const scraper = getScraperForSource(source, htmlClient);
       if (!scraper) {
         console.warn(`No scraper implemented for source: ${source}`);
         continue;

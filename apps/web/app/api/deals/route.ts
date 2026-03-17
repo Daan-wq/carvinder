@@ -1,7 +1,7 @@
 export const dynamic = "force-dynamic";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
-import { prisma, Source } from "@autarb/db";
+import { prisma, Source, DealTier } from "@autarb/db";
 
 const querySchema = z.object({
   page: z.coerce.number().int().positive().default(1),
@@ -10,6 +10,9 @@ const querySchema = z.object({
   model: z.string().optional(),
   source: z.enum([Source.MARKTPLAATS, Source.AUTOSCOUT, Source.FACEBOOK, Source.AUCTION, Source.OTHER]).optional(),
   acknowledged: z.enum(["true", "false"]).transform(v => v === "true").optional(),
+  dealTiers: z.string().optional(),
+  minConfidence: z.coerce.number().min(0).max(100).optional(),
+  sort: z.enum(["score", "confidence", "newest", "price"]).default("newest"),
 });
 
 export async function GET(request: NextRequest) {
@@ -24,36 +27,68 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const { page, limit, make, model, source, acknowledged } = parsed.data;
+    const { page, limit, make, model, source, acknowledged, dealTiers, minConfidence, sort } = parsed.data;
     const skip = (page - 1) * limit;
 
-    const listingWhere: any = {};
-    if (make) listingWhere.make = make;
-    if (model) listingWhere.model = model;
+    const listingWhere: Record<string, unknown> = {};
+    if (make) listingWhere.make = { contains: make, mode: "insensitive" };
+    if (model) listingWhere.model = { contains: model, mode: "insensitive" };
     if (source) listingWhere.source = source;
 
-    const where: any = {};
+    const where: Record<string, unknown> = {};
     if (Object.keys(listingWhere).length > 0) where.listing = listingWhere;
     if (acknowledged !== undefined) where.isAcknowledged = acknowledged;
+
+    // Deal tier filter (comma-separated values from UI)
+    if (dealTiers) {
+      const tiers = dealTiers.split(",").filter(t => Object.values(DealTier).includes(t as DealTier));
+      if (tiers.length > 0) where.dealTier = { in: tiers as DealTier[] };
+    }
+
+    // Confidence filter (stored as 0-1 float, UI sends 0-100)
+    if (minConfidence !== undefined && minConfidence > 0) {
+      where.confidence = { gte: minConfidence / 100 };
+    }
+
+    const orderBy = (() => {
+      switch (sort) {
+        case "score":      return { dealScore: "desc" as const };
+        case "confidence": return { confidence: "desc" as const };
+        case "price":      return { listingPrice: "asc" as const };
+        default:           return { createdAt: "desc" as const };
+      }
+    })();
 
     const [deals, total] = await Promise.all([
       prisma.dealAlert.findMany({
         where,
-        include: { listing: true, profile: true },
-        orderBy: { createdAt: "desc" },
+        include: {
+          listing: {
+            select: {
+              make: true, model: true, year: true, mileage: true,
+              fuelType: true, source: true, url: true, city: true,
+            },
+          },
+          mlPrediction: {
+            select: {
+              predictedP10: true, predictedP50: true, predictedP90: true,
+              dealScore: true, dealTier: true, overallConfidence: true,
+              suspicionFlag: true, coverageLevel: true, effectiveDealTier: true,
+            },
+          },
+        },
+        orderBy,
         skip,
         take: limit,
       }),
       prisma.dealAlert.count({ where }),
     ]);
 
-    const totalPages = Math.ceil(total / limit);
-
     return NextResponse.json({
       data: deals,
       total,
       page,
-      totalPages,
+      totalPages: Math.ceil(total / limit),
     });
   } catch (error) {
     console.error("Error fetching deals:", error);

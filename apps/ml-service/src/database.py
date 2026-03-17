@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import ssl
 from typing import AsyncGenerator
 
 from sqlalchemy import create_engine, text
@@ -17,14 +18,18 @@ if DATABASE_URL.startswith("postgresql://"):
 else:
     ASYNC_DATABASE_URL = DATABASE_URL
 
+# Railway proxy uses a self-signed cert chain — require SSL but skip verification
+_ssl_ctx = ssl.create_default_context()
+_ssl_ctx.check_hostname = False
+_ssl_ctx.verify_mode = ssl.CERT_NONE
+
 # Async engine for async operations
-# ssl=True: Railway proxy uses a valid TLS cert, ssl=True handles negotiation
 async_engine = create_async_engine(
     ASYNC_DATABASE_URL,
     echo=False,
     pool_size=5,
     max_overflow=5,
-    connect_args={"ssl": True},
+    connect_args={"ssl": _ssl_ctx},
 )
 
 # Synchronous engine for migrations and sync operations

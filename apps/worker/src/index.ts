@@ -1,8 +1,7 @@
 import express from "express";
 import cron from "node-cron";
 import { prisma, Source } from "@autarb/db";
-import { CreditTracker } from "./scrapers/credit-tracker";
-import { FetchClient } from "./scrapers/fetch-client";
+import { HtmlClient } from "./scrapers/html-client";
 import { AutoScoutScraper } from "./scrapers/autoscout";
 import { runScrapeJob } from "./jobs/scrape-job";
 
@@ -15,20 +14,12 @@ let lastRunTime: Date | null = null;
 let lastRunResult: Record<string, unknown> | null = null;
 let isRunning = false;
 
-app.get("/health", async (_req, res) => {
-  const creditTracker = new CreditTracker();
-  const usage = await creditTracker.getMonthlyUsage();
-
+app.get("/health", (_req, res) => {
   res.json({
     status: "ok",
     isRunning,
     lastRun: lastRunTime?.toISOString() ?? null,
     lastResult: lastRunResult,
-    creditUsage: {
-      used: usage.used,
-      limit: usage.limit,
-      remaining: usage.limit - usage.used,
-    },
   });
 });
 
@@ -56,7 +47,7 @@ function startScrape(trigger: string) {
     });
 }
 
-// Debug: fetch one AutoScout page and return raw markdown + parsed listings
+// Debug: fetch one AutoScout page and return parsed listings
 app.get("/debug-fetch", async (req, res) => {
   const authHeader = req.headers.authorization;
   if (!CRON_SECRET || authHeader !== `Bearer ${CRON_SECRET}`) {
@@ -67,18 +58,23 @@ app.get("/debug-fetch", async (req, res) => {
   const url = (req.query.url as string) || "https://www.autoscout24.nl/lst/volkswagen/golf/?sort=standard&desc=0&ustate=N%2CU&page=1";
 
   try {
-    const creditTracker = new CreditTracker();
-    const fetchClient = new FetchClient(creditTracker);
-    const { markdown, provider } = await fetchClient.fetchPage(url);
+    const client = new HtmlClient();
+    const { $, html } = await client.fetchPage(url);
 
-    const scraper = new AutoScoutScraper(fetchClient);
-    const listings = scraper.parseListings(markdown);
+    const fakeSearch = {
+      id: "", make: "Volkswagen", model: "Golf", yearMin: null, yearMax: null,
+      mileageMax: null, maxPrice: null, alertThresholdPercent: 15,
+      sources: [Source.AUTOSCOUT], isActive: true, lastScrapedAt: null,
+      createdAt: new Date(), updatedAt: new Date(),
+    } as any;
+
+    const scraper = new AutoScoutScraper(client);
+    const listings = scraper.parseListings($, fakeSearch);
 
     res.json({
-      provider,
       url,
-      markdownLength: markdown.length,
-      markdownSample: markdown.substring(0, 3000),
+      htmlLength: html.length,
+      htmlSample: html.substring(0, 2000),
       listingsParsed: listings.length,
       listings: listings.slice(0, 5),
     });

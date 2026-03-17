@@ -90,7 +90,16 @@ def run_training_pipeline(
             rdw."eersteTenaamstellingNl" as eerste_tenaamstelling_nl,
             rdw."apkVervaldatum" as apk_vervaldatum,
             rdw."eersteKleur" as eerste_kleur,
-            cl."listedAt" as listed_at
+            cl."listedAt" as listed_at,
+            cl."bodyType" as body_type,
+            cl."doors" as doors,
+            cl."color" as color,
+            cl."previousOwners" as previous_owners,
+            cl."sellerType" as seller_type,
+            cl."hasNap" as has_nap,
+            cl."warrantyMonths" as warranty_months,
+            cl."engineCc" as engine_cc,
+            cl."options" as options
         FROM car_listings cl
         LEFT JOIN listing_nlp_features nlp ON nlp."listingId" = cl.id
         LEFT JOIN listing_tax_data tax ON tax."listingId" = cl.id

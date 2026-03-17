@@ -20,7 +20,7 @@ import * as dotenv from "dotenv";
 import * as path from "path";
 dotenv.config({ path: path.resolve(__dirname, "../../../.env") });
 
-import { prisma, Source, Condition, FuelType, Transmission } from "@autarb/db";
+import { prisma, Source, Condition, FuelType, Transmission, SellerType } from "@autarb/db";
 import { HtmlClient } from "./scrapers/html-client";
 import { recalculatePriceProfiles } from "./jobs/price-calculator";
 
@@ -91,6 +91,15 @@ interface ParsedListing {
   country: string;
   rawData: object;
   listedAt?: Date;
+  bodyType?: string;
+  doors?: number;
+  color?: string;
+  previousOwners?: number;
+  sellerType?: SellerType;
+  serviceHistory?: string;
+  warrantyMonths?: number;
+  engineCc?: number;
+  options: string[];
 }
 
 interface PageResult {
@@ -181,6 +190,28 @@ function parseTransmission(text: string | undefined): Transmission | undefined {
   return undefined;
 }
 
+function parseWarrantyMonths(text: string | undefined): number | undefined {
+  if (!text) return undefined;
+  const m = text.match(/(\d+)\s*(maand|month|mnd)/i);
+  if (m) return parseInt(m[1], 10);
+  const y = text.match(/(\d+)\s*(jaar|year|jr)/i);
+  if (y) return parseInt(y[1], 10) * 12;
+  if (/ja|yes/i.test(text)) return 1;
+  return undefined;
+}
+
+function parseDoors(text: string | undefined): number | undefined {
+  if (!text) return undefined;
+  const m = text.match(/(\d+)/);
+  return m ? parseInt(m[1], 10) : undefined;
+}
+
+function parsePreviousOwners(text: string | undefined): number | undefined {
+  if (!text) return undefined;
+  const m = text.match(/(\d+)/);
+  return m ? parseInt(m[1], 10) : undefined;
+}
+
 // ─── Fetch one page ───────────────────────────────────────────────────────────
 
 async function fetchPage(
@@ -238,9 +269,35 @@ async function fetchPage(
 
       const powerMatch = detail("speedometer").match(/(\d+)\s*kW/i);
 
-      // AutoScout exposes listing date as firstOnlineDate (ISO string) on the listing object
+      // Listing date
       const rawListedAt = raw.firstOnlineDate ?? raw.listedAt ?? raw.onlineDate ?? null;
       const listedAt = rawListedAt ? new Date(rawListedAt) : undefined;
+
+      // Extended fields
+      const bodyType: string | undefined = raw.vehicle?.bodyType ?? detail("car") ?? undefined;
+      const doors = parseDoors(raw.vehicle?.doors?.toString() ?? detail("door"));
+      const color: string | undefined = raw.vehicle?.color ?? raw.vehicle?.exteriorColor ?? detail("paint_brush") ?? undefined;
+      const previousOwners = parsePreviousOwners(detail("history") || detail("owners"));
+      const serviceHistory: string | undefined = detail("tools") || detail("service_history") || undefined;
+      const warrantyMonths = parseWarrantyMonths(detail("shield_check") || detail("warranty"));
+      const engineCcStr = raw.vehicle?.engineDisplacement ?? detail("engine");
+      const engineCc = engineCcStr ? parseInt(String(engineCcStr).replace(/\D/g, "")) || undefined : undefined;
+
+      const sellerRaw = raw.seller?.type?.toLowerCase();
+      const sellerType: SellerType | undefined =
+        sellerRaw === "d" || sellerRaw === "dealer" ? SellerType.DEALER :
+        sellerRaw === "p" || sellerRaw === "private" ? SellerType.PRIVATE :
+        undefined;
+
+      const options: string[] = [];
+      const features = (raw.features as string[] | undefined) ?? [];
+      if (features.some((f: string) => /towbar|tow.hook|trekhaak/i.test(f))) options.push("tow_hook");
+      if (features.some((f: string) => /air.?cond|airco|klimaat/i.test(f))) options.push("air_conditioning");
+      if (features.some((f: string) => /cruise/i.test(f))) options.push("cruise_control");
+      if (features.some((f: string) => /navigat|navi\b/i.test(f))) options.push("navigation");
+      if (features.some((f: string) => /leather|leder/i.test(f))) options.push("leather_seats");
+      if (features.some((f: string) => /panoram|schuifdak/i.test(f))) options.push("panoramic_roof");
+      if (features.some((f: string) => /parking.?sensor|park.?assist|pdc/i.test(f))) options.push("parking_sensors");
 
       listings.push({
         externalId,
@@ -258,6 +315,15 @@ async function fetchPage(
         country: raw.location?.countryCode ?? "NL",
         rawData: { source: "autoscout24", powerKw: powerMatch ? parseInt(powerMatch[1], 10) : undefined },
         listedAt,
+        bodyType,
+        doors,
+        color,
+        previousOwners,
+        sellerType,
+        serviceHistory,
+        warrantyMonths,
+        engineCc,
+        options,
       });
     } catch { /* skip malformed */ }
   }
@@ -338,6 +404,15 @@ async function upsertListing(listing: ParsedListing, stats: Stats) {
           country: listing.country,
           rawData: listing.rawData,
           listedAt: listing.listedAt ?? null,
+          bodyType: listing.bodyType ?? null,
+          doors: listing.doors ?? null,
+          color: listing.color ?? null,
+          previousOwners: listing.previousOwners ?? null,
+          sellerType: listing.sellerType ?? null,
+          serviceHistory: listing.serviceHistory ?? null,
+          warrantyMonths: listing.warrantyMonths ?? null,
+          engineCc: listing.engineCc ?? null,
+          options: listing.options,
         },
       });
       await prisma.carListingPriceHistory

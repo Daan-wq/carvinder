@@ -38,6 +38,11 @@ enum Transmission {
   OTHER
 }
 
+enum SellerType {
+  PRIVATE
+  DEALER
+}
+
 enum MileageBucket {
   KM_0_50K
   KM_50_100K
@@ -89,6 +94,16 @@ model CarListing {
   country        String        @default("NL")
   kenteken       String?
   rawData        Json?
+  bodyType       String?
+  doors          Int?
+  color          String?
+  previousOwners Int?
+  sellerType     SellerType?
+  serviceHistory String?
+  hasNap         Boolean?
+  warrantyMonths Int?
+  engineCc       Int?
+  options        String[]
   isActive       Boolean       @default(true)
   isSold         Boolean       @default(false)
   isPriceChanged Boolean       @default(false)

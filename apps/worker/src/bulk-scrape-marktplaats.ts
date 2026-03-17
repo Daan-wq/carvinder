@@ -16,7 +16,7 @@ import * as dotenv from "dotenv";
 import * as path from "path";
 dotenv.config({ path: path.resolve(__dirname, "../../../.env") });
 
-import { prisma, Source, Condition, FuelType, Transmission } from "@autarb/db";
+import { prisma, Source, Condition, FuelType, Transmission, SellerType } from "@autarb/db";
 import { HtmlClient } from "./scrapers/html-client";
 import { recalculatePriceProfiles } from "./jobs/price-calculator";
 
@@ -69,6 +69,7 @@ interface MpListing {
   pictures?: Array<{ extraExtraLargeUrl?: string; largeUrl?: string; mediumUrl?: string }>;
   vipUrl?: string;
   date?: number; // Unix ms timestamp when listing was first posted
+  sellerInformation?: { sellerType?: string; sellerId?: string };
 }
 
 interface PageResult {
@@ -113,6 +114,15 @@ function parseTransmission(text: string | undefined): Transmission | undefined {
   if (/automaat|automatic/.test(t)) return Transmission.AUTOMATIC;
   if (/handgeschakeld|manual|schakel/.test(t)) return Transmission.MANUAL;
   return undefined;
+}
+
+function parseWarrantyMonths(text: string): number | null {
+  const m = text.match(/(\d+)\s*(maand|month|mnd)/i);
+  if (m) return parseInt(m[1], 10);
+  const y = text.match(/(\d+)\s*(jaar|year|jr)/i);
+  if (y) return parseInt(y[1], 10) * 12;
+  if (/ja|yes/i.test(text)) return 1; // warranty present but duration unknown → 1
+  return null;
 }
 
 // ─── Fetch a page ─────────────────────────────────────────────────────────────
@@ -221,6 +231,36 @@ async function upsertListing(raw: MpListing, makeName: string, stats: Stats) {
   const fuelType = parseFuelType(attr(raw, "fuel"));
   const transmission = parseTransmission(attr(raw, "transmission"));
 
+  // Extended fields
+  const bodyType = attr(raw, "bodyType") ?? null;
+  const doorsStr = attr(raw, "numberOfDoors");
+  const doors = doorsStr ? parseInt(doorsStr, 10) : null;
+  const color = attr(raw, "exteriorColour") ?? attr(raw, "color") ?? null;
+  const prevOwnersStr = attr(raw, "numberOfPreviousOwners");
+  const previousOwners = prevOwnersStr ? parseInt(prevOwnersStr, 10) : null;
+  const napRaw = attr(raw, "nap")?.toLowerCase();
+  const hasNap = napRaw ? napRaw === "ja" || napRaw === "yes" : null;
+  const engineCcStr = attr(raw, "engineCapacity");
+  const engineCc = engineCcStr ? parseInt(engineCcStr, 10) : null;
+  const serviceHistory = attr(raw, "serviceHistory") ?? null;
+  const warrantyRaw = attr(raw, "warranty");
+  const warrantyMonths = warrantyRaw ? parseWarrantyMonths(warrantyRaw) : null;
+
+  const sellerRaw = raw.sellerInformation?.sellerType?.toLowerCase();
+  const sellerType: SellerType | null =
+    sellerRaw === "professional" || sellerRaw === "dealer" ? SellerType.DEALER :
+    sellerRaw === "private" || sellerRaw === "particulier" ? SellerType.PRIVATE :
+    null;
+
+  const options: string[] = [];
+  if (attr(raw, "towbar")?.toLowerCase() === "ja") options.push("tow_hook");
+  if (attr(raw, "airConditioning")?.toLowerCase() === "ja") options.push("air_conditioning");
+  if (attr(raw, "cruiseControl")?.toLowerCase() === "ja") options.push("cruise_control");
+  if (attr(raw, "navigationSystem")?.toLowerCase() === "ja") options.push("navigation");
+  if (attr(raw, "leatherInterior")?.toLowerCase() === "ja") options.push("leather_seats");
+  if (attr(raw, "panoramicRoof")?.toLowerCase() === "ja") options.push("panoramic_roof");
+  if (attr(raw, "parkingAssistance")?.toLowerCase() === "ja") options.push("parking_sensors");
+
   const vipUrl = raw.vipUrl
     ? `https://www.marktplaats.nl${raw.vipUrl}`
     : `https://www.marktplaats.nl/v/auto-s/${externalId}`;
@@ -256,6 +296,16 @@ async function upsertListing(raw: MpListing, makeName: string, stats: Stats) {
           country: raw.location?.countryAbbreviation ?? "NL",
           rawData: { source: "marktplaats" },
           listedAt,
+          bodyType,
+          doors,
+          color,
+          previousOwners,
+          sellerType,
+          serviceHistory,
+          hasNap,
+          warrantyMonths,
+          engineCc,
+          options,
         },
       });
       await prisma.carListingPriceHistory

@@ -80,11 +80,30 @@ def engineer_features(listing: dict[str, Any]) -> dict[str, Any]:
     features["power_kw"] = listing.get("power_kw") or 0
     features["mileage_km"] = listing.get("mileage") or 0
     features["seller_type"] = (
-        1 if (listing.get("seller_type") or "").lower() == "dealer" else 0
+        1 if (listing.get("seller_type") or "").lower() in ("dealer", "DEALER") else 0
     )
     features["platform"] = (listing.get("platform") or "unknown").lower().strip()
     features["photo_count"] = listing.get("photo_count") or 0
     features["province"] = (listing.get("province") or "unknown").lower().strip()
+
+    # Extended listing fields
+    features["doors"] = listing.get("doors") or 0
+    features["previous_owners"] = listing.get("previous_owners") or listing.get("previousOwners") or -1
+    features["has_nap"] = int(listing.get("has_nap") or listing.get("hasNap") or 0)
+    features["warranty_months"] = listing.get("warranty_months") or listing.get("warrantyMonths") or 0
+    features["engine_cc_listing"] = listing.get("engine_cc") or listing.get("engineCc") or 0
+    features["body_type"] = (listing.get("body_type") or listing.get("bodyType") or "unknown").lower().strip()
+    features["color_group"] = _normalize_color(listing.get("color"))
+
+    options = listing.get("options") or []
+    if isinstance(options, str):
+        options = [options]
+    features["has_tow_hook"] = int("tow_hook" in options)
+    features["has_air_conditioning"] = int("air_conditioning" in options)
+    features["has_navigation"] = int("navigation" in options)
+    features["has_leather_seats"] = int("leather_seats" in options)
+    features["has_panoramic_roof"] = int("panoramic_roof" in options)
+    features["has_parking_sensors"] = int("parking_sensors" in options)
 
     # --- Age calculation ---
     year = listing.get("year")
@@ -276,6 +295,17 @@ def get_numeric_feature_names() -> list[str]:
         "month_cos",
         "platform_bias_factor",
         "seller_type",
+        "doors",
+        "previous_owners",
+        "has_nap",
+        "warranty_months",
+        "engine_cc_listing",
+        "has_tow_hook",
+        "has_air_conditioning",
+        "has_navigation",
+        "has_leather_seats",
+        "has_panoramic_roof",
+        "has_parking_sensors",
         "has_damage_keywords",
         "has_no_apk_keywords",
         "has_export_keywords",
@@ -286,6 +316,26 @@ def get_numeric_feature_names() -> list[str]:
         "brand_target_enc",
         "model_target_enc",
     ]
+
+
+def _normalize_color(color: str | None) -> str:
+    """Group Dutch/English color names into 6 buckets."""
+    if not color:
+        return "unknown"
+    c = color.lower().strip()
+    if any(x in c for x in ["zwart", "black"]):
+        return "black"
+    if any(x in c for x in ["wit", "white", "creme", "cream", "beige"]):
+        return "white"
+    if any(x in c for x in ["grijs", "grey", "gray", "zilver", "silver"]):
+        return "grey"
+    if any(x in c for x in ["rood", "red", "bordeaux", "burgundy"]):
+        return "red"
+    if any(x in c for x in ["blauw", "blue", "navy"]):
+        return "blue"
+    if any(x in c for x in ["groen", "green"]):
+        return "green"
+    return "other"
 
 
 def _normalize_fuel(fuel: str | None) -> str:

@@ -4,6 +4,7 @@ import { prisma, Source } from "@autarb/db";
 import { HtmlClient } from "./scrapers/html-client";
 import { AutoScoutScraper } from "./scrapers/autoscout";
 import { runScrapeJob } from "./jobs/scrape-job";
+import { runBulkScoreJob, getBulkScoreStatus } from "./jobs/bulk-score-job";
 
 const app = express();
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3001;
@@ -97,6 +98,27 @@ app.post("/run", (req, res) => {
 
   res.status(202).json({ message: "Scrape job started" });
   startScrape("manual");
+});
+
+app.post("/bulk-score", (req, res) => {
+  const authHeader = req.headers.authorization;
+  if (!CRON_SECRET || authHeader !== `Bearer ${CRON_SECRET}`) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
+
+  const { running } = getBulkScoreStatus();
+  if (running) {
+    res.status(409).json({ message: "Bulk score already in progress", ...getBulkScoreStatus() });
+    return;
+  }
+
+  res.status(202).json({ message: "Bulk score job started" });
+  void runBulkScoreJob().catch(e => console.error("[bulk-score] Fatal error:", e));
+});
+
+app.get("/bulk-score/status", (_req, res) => {
+  res.json(getBulkScoreStatus());
 });
 
 app.listen(PORT, async () => {

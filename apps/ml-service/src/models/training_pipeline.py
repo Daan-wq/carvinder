@@ -52,7 +52,7 @@ def run_training_pipeline(
     logger.info(f"Starting training pipeline: {version}")
 
     # Step 1: Load data
-    engine = create_engine(settings.database_url, connect_args={"sslmode": "disable"})
+    engine = create_engine(settings.database_url, connect_args={"sslmode": "require"})
 
     window_start = datetime.now() - timedelta(days=TRAINING_WINDOW_MONTHS * 30)
 

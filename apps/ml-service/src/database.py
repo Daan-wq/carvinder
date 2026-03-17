@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from typing import AsyncGenerator
 
@@ -20,18 +21,16 @@ else:
 async_engine = create_async_engine(
     ASYNC_DATABASE_URL,
     echo=False,
-    pool_size=20,
-    max_overflow=0,
-    connect_args={"ssl": False},
+    pool_size=5,
+    max_overflow=5,
 )
 
 # Synchronous engine for migrations and sync operations
 sync_engine = create_engine(
     settings.database_url,
     echo=False,
-    pool_size=20,
-    max_overflow=0,
-    connect_args={"sslmode": "disable"},
+    pool_size=5,
+    max_overflow=5,
 )
 
 # Session factories
@@ -70,10 +69,16 @@ def get_db() -> AsyncGenerator[Session, None]:
 
 async def check_db_connection() -> bool:
     """Check if database is reachable."""
-    try:
+    async def _check() -> bool:
         async with async_engine.begin() as conn:
             await conn.execute(text("SELECT 1"))
         return True
+
+    try:
+        return await asyncio.wait_for(_check(), timeout=5.0)
+    except asyncio.TimeoutError:
+        logger.error("Database connection check timed out after 5s")
+        return False
     except Exception as e:
         logger.error(f"Database connection failed: {e}")
         return False

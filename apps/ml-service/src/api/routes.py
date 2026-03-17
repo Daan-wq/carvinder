@@ -23,7 +23,6 @@ from src.api.schemas import (
 )
 from src.config import settings
 from src.data.feature_engineering import (
-    compute_feature_completeness,
     engineer_features,
     get_numeric_feature_names,
     set_target_encodings,
@@ -34,6 +33,7 @@ from src.models.confidence import (
     classify_deal_tier,
     compute_confidence,
     compute_deal_score,
+    compute_feature_completeness,
 )
 from src.models.price_model import QuantilePriceModel
 from src.models.training_pipeline import run_training_pipeline
